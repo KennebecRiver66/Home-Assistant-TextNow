@@ -570,6 +570,14 @@ class TextNowPanel extends HTMLElement {
           color: #4caf50;
         }
         
+        .status-value.warning {
+          color: #ff9800;
+        }
+        
+        .status-value.offline {
+          color: #f44336;
+        }
+        
         .no-accounts {
           text-align: center;
           padding: 60px 24px;
@@ -780,21 +788,42 @@ class TextNowPanel extends HTMLElement {
     // Status for each account
     for (const entry of this._entries) {
       const contacts = this._contactsByEntry[entry.entry_id] || [];
+
+      let stateLabel = "Connected";
+      let stateClass = "online";
+      if (entry.needs_reauth) {
+        stateLabel = "New cookies needed";
+        stateClass = "offline";
+      } else if (!entry.connected) {
+        stateLabel = entry.loaded ? "Disconnected" : "Not loaded";
+        stateClass = "warning";
+      }
+
       statusHtml += `
         <div class="card">
           <h3 class="card-title">${entry.title}</h3>
           <div class="status-item">
             <span class="status-label">Status</span>
-            <span class="status-value online">Connected</span>
+            <span class="status-value ${stateClass}">${stateLabel}</span>
           </div>
           <div class="status-item">
             <span class="status-label">Contacts</span>
             <span class="status-value">${contacts.length}</span>
           </div>
+          ${entry.polling_interval ? `
           <div class="status-item">
-            <span class="status-label">Entry ID</span>
-            <span class="status-value" style="font-size:11px; word-break:break-all; font-family:monospace;">${entry.entry_id}</span>
-          </div>
+            <span class="status-label">Checks for messages</span>
+            <span class="status-value">every ${entry.polling_interval}s</span>
+          </div>` : ""}
+          ${entry.last_error ? `
+          <div class="status-item">
+            <span class="status-label">Last error</span>
+            <span class="status-value" style="font-size:12px; text-align:right; max-width:60%;">${entry.last_error}</span>
+          </div>` : ""}
+          ${entry.needs_reauth ? `
+          <div style="margin-top:12px;">
+            <button class="btn btn-primary fix-account" data-entry="${entry.entry_id}">Fix connection</button>
+          </div>` : ""}
         </div>
       `;
     }
@@ -876,6 +905,13 @@ class TextNowPanel extends HTMLElement {
     if (refreshAllBtn) {
       refreshAllBtn.addEventListener("click", () => this._loadEntries());
     }
+
+    // Jump to the integration page to paste fresh cookies
+    this.shadowRoot.querySelectorAll(".fix-account").forEach(btn => {
+      btn.addEventListener("click", () => {
+        window.location.href = "/config/integrations/integration/textnow";
+      });
+    });
   }
 }
 

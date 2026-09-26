@@ -7,9 +7,10 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 
-from .const import DOMAIN
+from .const import CONF_POLLING_INTERVAL, DOMAIN
 from .phone_utils import format_phone_number
 from .storage import TextNowStorage
 
@@ -36,15 +37,29 @@ def async_setup(hass: HomeAssistant) -> None:
 async def websocket_get_entries(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Get all TextNow config entries."""
-    entries = hass.config_entries.async_entries(DOMAIN)
-    result = [
-        {
-            "entry_id": entry.entry_id,
-            "title": entry.title,
-        }
-        for entry in entries
-    ]
+    """Get all TextNow config entries with their connection state."""
+    result = []
+
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        last_error = getattr(coordinator, "last_exception", None)
+        result.append(
+            {
+                "entry_id": entry.entry_id,
+                "title": entry.title,
+                "loaded": entry.state is ConfigEntryState.LOADED,
+                "connected": bool(
+                    coordinator is not None and coordinator.last_update_success
+                ),
+                "needs_reauth": bool(
+                    coordinator is not None and coordinator.auth_failed
+                )
+                or entry.state is ConfigEntryState.SETUP_ERROR,
+                "last_error": str(last_error) if last_error else "",
+                "polling_interval": entry.data.get(CONF_POLLING_INTERVAL),
+            }
+        )
+
     connection.send_result(msg["id"], result)
 
 
