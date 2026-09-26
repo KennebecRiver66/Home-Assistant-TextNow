@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Awaitable, Callable
+from functools import wraps
 from typing import Any
 from urllib.parse import unquote
 
@@ -11,6 +13,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.helpers import selector
 
 from .const import (
@@ -171,7 +174,12 @@ async def async_validate_account(
     Returns the username used, the values to store on the config entry, and
     any error to show on the form.
     """
-    cookies = parse_cookie_string(cookie_string)
+    try:
+        cookies = parse_cookie_string(cookie_string)
+    except Exception:  # noqa: BLE001 - a paste must never break the form
+        _LOGGER.exception("Could not read the pasted TextNow request")
+        return username, {}, {"base": "no_cookies"}
+
     if not cookies:
         return username, {}, {"base": "no_cookies"}
     if "connect.sid" not in cookies:
@@ -210,6 +218,47 @@ async def async_validate_account(
     return username, credentials, {}
 
 
+def crash_proof_step(
+    func: Callable[..., Awaitable[ConfigFlowResult]]
+) -> Callable[..., Awaitable[ConfigFlowResult]]:
+    """Answer with a form when a step fails unexpectedly.
+
+    A step that raises leaves its flow registered with nothing to render. That
+    flow is invisible on the integrations page, so the user cannot answer it
+    or dismiss it, and it is still enough to make Home Assistant decline to
+    open a real sign-in prompt in its place -- which is how one bad paste
+    turned into a permanently stuck account. Nothing that can go wrong in a
+    step is worth that, so every step answers with a form either way.
+    """
+
+    @wraps(func)
+    async def _guarded(
+        self: TextNowConfigFlow, *args: Any, **kwargs: Any
+    ) -> ConfigFlowResult:
+        try:
+            return await func(self, *args, **kwargs)
+        except AbortFlow:
+            # How a flow legitimately finishes or declines a duplicate
+            raise
+        except Exception:  # noqa: BLE001 - the alternative is an orphan flow
+            _LOGGER.exception("The TextNow %s step failed unexpectedly", func.__name__)
+            return self.async_show_form(
+                # Deliberately plain: whatever just failed must not be needed
+                # to build the form that reports it.
+                step_id=func.__name__.removeprefix("async_step_"),
+                data_schema=vol.Schema(
+                    {
+                        vol.Optional(CONF_USERNAME, default=""): str,
+                        vol.Required("cookie_string"): str,
+                    }
+                ),
+                errors={"base": "unknown"},
+                description_placeholders=form_placeholders(),
+            )
+
+    return _guarded
+
+
 class TextNowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for TextNow."""
 
@@ -219,6 +268,7 @@ class TextNowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Initialize the config flow."""
         self._reauth_entry: config_entries.ConfigEntry | None = None
 
+    @crash_proof_step
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -256,10 +306,21 @@ class TextNowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_reauth(
         self, entry_data: dict[str, Any]
     ) -> ConfigFlowResult:
-        """Handle expired cookies."""
-        self._reauth_entry = self._get_reauth_entry()
+        """Handle expired cookies.
+
+        Aborting rather than showing a form is right when the entry itself has
+        gone: there is nothing to sign back in to. It still has to be an
+        abort and not a raise, because a step that raises leaves a flow behind
+        that nobody can see or clear.
+        """
+        try:
+            self._reauth_entry = self._get_reauth_entry()
+        except Exception:  # noqa: BLE001 - the alternative is an orphan flow
+            _LOGGER.exception("Could not find the TextNow account to sign in again")
+            return self.async_abort(reason="reauth_failed")
         return await self.async_step_reauth_confirm()
 
+    @crash_proof_step
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:

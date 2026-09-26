@@ -24,6 +24,7 @@ from custom_components.textnow.const import (
     MIN_KEEPALIVE_DAYS,
 )
 from custom_components.textnow.coordinator import TextNowDataUpdateCoordinator
+from fakes import FakeHass
 
 SAFE_NUMBER = "+15555550100"
 
@@ -59,6 +60,9 @@ class _Account(TextNowDataUpdateCoordinator):
         self.storage = _Storage(stored)
         self.sent: list[tuple[str, str]] = []
         self.fail_with: Exception | None = None
+        self.auth_failed = False
+        self.hass = FakeHass()
+        self.entry = self.hass.make_entry()
 
     async def send_message(self, phone: str, message: str) -> None:
         if self.fail_with is not None:

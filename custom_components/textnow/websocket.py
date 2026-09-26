@@ -1,13 +1,14 @@
 """WebSocket API for TextNow panel."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
-from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry, ConfigEntryState
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 
@@ -20,6 +21,7 @@ from .const import (
     DOMAIN,
 )
 from .phone_utils import format_phone_number
+from .reauth import async_clear_reauth_flows, async_visible_reauth_flows
 from .storage import TextNowStorage
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,6 +46,10 @@ STATUS_REAUTH_REQUIRED = "reauth_required"
 STATUS_OFFLINE = "offline"
 STATUS_DISABLED = "disabled"
 
+# How long the panel's sign-in button waits for the form it asked for
+REAUTH_WAIT_STEP = 0.05
+REAUTH_WAIT_ATTEMPTS = 40
+
 
 def _entry_status(hass: HomeAssistant, entry: ConfigEntry, coordinator: Any) -> str:
     """Return one status for an account, in the order that matters to a user.
@@ -52,30 +58,39 @@ def _entry_status(hass: HomeAssistant, entry: ConfigEntry, coordinator: Any) -> 
     the user can do something about. An expired session stops the entry from
     loading at all, so the state has to be read without a coordinator too.
 
-    Home Assistant's own view of the entry comes first. The coordinator's
-    auth_failed is only consulted about a poll that actually failed: as a
-    free-standing flag it is a second copy of a truth Home Assistant already
-    tracks, and it is the copy that drifts.
+    The honest signal for "this session no longer works" is the outcome of the
+    last authenticated call, so that is what decides it for a loaded account.
+    Whether a sign-in prompt happens to be open says nothing about the health
+    of the session -- a prompt is a piece of interface, and reading it as a
+    health signal is what produced a banner that would not go away while
+    messages were sending normally. It is consulted only where Home Assistant
+    itself is undecided and there is no poll result to trust.
     """
     if entry.disabled_by is not None:
         return STATUS_DISABLED
-    if (
-        entry.state is ConfigEntryState.SETUP_ERROR
-        or entry.async_get_active_flows(hass, {SOURCE_REAUTH})
-        or (
-            coordinator is not None
-            and coordinator.auth_failed
-            and not coordinator.last_update_success
-        )
-    ):
+
+    # An auth failure during setup leaves the entry here, and this is Home
+    # Assistant's own view of it rather than a second copy of ours.
+    if entry.state is ConfigEntryState.SETUP_ERROR:
         return STATUS_REAUTH_REQUIRED
+
+    if entry.state is ConfigEntryState.LOADED and coordinator is not None:
+        # A poll that just worked is the strongest evidence available that the
+        # session is fine, and it outranks everything else.
+        if coordinator.last_update_success:
+            return STATUS_CONNECTED
+        if coordinator.auth_failed:
+            return STATUS_REAUTH_REQUIRED
+        return STATUS_OFFLINE
+
     if entry.state is ConfigEntryState.SETUP_RETRY:
+        # Retrying is a network problem, unless a sign-in prompt is waiting to
+        # be answered -- which only happens when the failure was an auth one.
+        if async_visible_reauth_flows(hass, entry):
+            return STATUS_REAUTH_REQUIRED
         return STATUS_OFFLINE
-    if entry.state is not ConfigEntryState.LOADED or coordinator is None:
-        return STATUS_DISABLED
-    if not coordinator.last_update_success:
-        return STATUS_OFFLINE
-    return STATUS_CONNECTED
+
+    return STATUS_DISABLED
 
 
 def _keepalive_state(entry: ConfigEntry, coordinator: Any) -> dict[str, Any]:
@@ -208,6 +223,11 @@ async def websocket_start_reauth(
     Without this the panel could only send the user to the integrations
     page, which shows a reauth prompt when Home Assistant happens to have
     one open and nothing at all when it does not.
+
+    Pressing this must always produce something the user can see. It used to
+    skip starting a flow whenever one appeared to be open already, and an
+    invisible leftover flow counts as open, so the button became a no-op with
+    no way for the user to tell why.
     """
     entry_id = msg["entry_id"]
 
@@ -216,11 +236,50 @@ async def websocket_start_reauth(
         connection.send_error(msg["id"], "not_found", "Config entry not found")
         return
 
-    # Starting a second one would leave the user with two identical prompts.
-    if not entry.async_get_active_flows(hass, {SOURCE_REAUTH}):
-        entry.async_start_reauth(hass)
+    # A prompt already waiting is the answer: point at it rather than adding
+    # a second identical one.
+    if visible := async_visible_reauth_flows(hass, entry):
+        connection.send_result(
+            msg["id"],
+            {"success": True, "started": False, "flow_id": visible[0]["flow_id"]},
+        )
+        return
 
-    connection.send_result(msg["id"], {"success": True})
+    # Anything left now has no step to show, so nobody can answer or dismiss
+    # it, and Home Assistant's own de-duplication would refuse to open a real
+    # prompt while it is there.
+    async_clear_reauth_flows(hass, entry)
+
+    entry.async_start_reauth(hass)
+    flow_id = await _async_wait_for_reauth_prompt(hass, entry)
+    if flow_id is None:
+        connection.send_error(
+            msg["id"],
+            "reauth_not_started",
+            "Home Assistant did not open the sign-in form. Open Settings, "
+            "Devices & services, and use the TextNow entry there.",
+        )
+        return
+
+    connection.send_result(
+        msg["id"], {"success": True, "started": True, "flow_id": flow_id}
+    )
+
+
+async def _async_wait_for_reauth_prompt(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> str | None:
+    """Wait briefly for a started reauth flow to become answerable.
+
+    async_start_reauth schedules the work rather than doing it, so the flow
+    does not exist the moment it returns. Waiting for it is what lets this
+    report whether the button did anything instead of assuming it did.
+    """
+    for _ in range(REAUTH_WAIT_ATTEMPTS):
+        await asyncio.sleep(REAUTH_WAIT_STEP)
+        if visible := async_visible_reauth_flows(hass, entry):
+            return str(visible[0]["flow_id"])
+    return None
 
 
 @websocket_api.websocket_command(

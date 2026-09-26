@@ -7,22 +7,26 @@ useful in that state, because that is exactly when the user presses them.
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+from typing import Any
 
+import pytest
 from homeassistant.config_entries import ConfigEntryState
 
+from custom_components.textnow import websocket
 from custom_components.textnow.const import DOMAIN
-from custom_components.textnow.websocket import websocket_refresh
+from custom_components.textnow.websocket import websocket_refresh, websocket_start_reauth
+from fakes import FakeHass
 
 # The handlers are registered through Home Assistant's async_response
 # decorator, which schedules them on a live connection. The coroutine
 # underneath is what holds the behaviour worth testing.
 refresh = websocket_refresh.__wrapped__
+start_reauth = websocket_start_reauth.__wrapped__
 
 
 class _Connection:
     def __init__(self) -> None:
-        self.results: list[object] = []
+        self.results: list[Any] = []
         self.errors: list[tuple[str, str]] = []
 
     def send_result(self, _id, result) -> None:
@@ -30,38 +34,6 @@ class _Connection:
 
     def send_error(self, _id, code, message) -> None:
         self.errors.append((code, message))
-
-
-class _ConfigEntries:
-    def __init__(self, entry, on_reload=None) -> None:
-        self._entry = entry
-        self._on_reload = on_reload
-        self.reloaded: list[str] = []
-
-    def async_get_entry(self, entry_id):
-        return self._entry if entry_id == self._entry.entry_id else None
-
-    async def async_reload(self, entry_id) -> None:
-        self.reloaded.append(entry_id)
-        if self._on_reload is not None:
-            self._on_reload()
-
-
-class _Hass:
-    def __init__(self, entry, data, on_reload=None) -> None:
-        self.config_entries = _ConfigEntries(entry, on_reload)
-        self.data = data
-
-
-def _entry(state=ConfigEntryState.SETUP_ERROR, reason="") -> SimpleNamespace:
-    return SimpleNamespace(
-        entry_id="entry-1",
-        domain=DOMAIN,
-        state=state,
-        reason=reason,
-        disabled_by=None,
-        async_get_active_flows=lambda hass, sources: [],
-    )
 
 
 class _Coordinator:
@@ -81,26 +53,41 @@ class _Coordinator:
         self.last_update_success = True
 
 
+def _setup(state=ConfigEntryState.SETUP_ERROR, reason="", coordinator=None):
+    hass = FakeHass()
+    entry = hass.make_entry(state=state, reason=reason)
+    hass.data[DOMAIN] = {}
+    if coordinator is not None:
+        hass.data[DOMAIN][entry.entry_id] = coordinator
+    return hass, entry, _Connection()
+
+
+def _msg(entry_id="entry-1"):
+    return {"id": 1, "entry_id": entry_id}
+
+
+# ------------------------------------------------------------------ refresh
+
+
 def test_refresh_retries_the_setup_when_the_entry_never_loaded() -> None:
     """Pressing Refresh on a failed account must try again, not report a fault.
 
     There is no coordinator to poll in this state. Reloading is the only thing
     that can bring the account back, and it is what the button means.
     """
-    entry = _entry(reason="TextNow rejected the session (HTTP 401)")
-    data = {DOMAIN: {}}
+    hass, entry, connection = _setup(reason="TextNow rejected the session (HTTP 401)")
     coordinator = _Coordinator()
 
-    def _loads() -> None:
+    async def _loads(entry_id: str) -> None:
+        hass.config_entries.reloaded.append(entry_id)
         entry.state = ConfigEntryState.LOADED
         coordinator.auth_failed = False
         coordinator.last_update_success = True
-        data[DOMAIN]["entry-1"] = coordinator
+        hass.data[DOMAIN][entry_id] = coordinator
 
-    hass = _Hass(entry, data, on_reload=_loads)
-    connection = _Connection()
+    hass.config_entries.async_reload = _loads
 
-    asyncio.run(refresh(hass, connection, {"id": 1, "entry_id": "entry-1"}))
+    asyncio.run(refresh(hass, connection, _msg()))
 
     assert hass.config_entries.reloaded == ["entry-1"]
     assert connection.errors == []
@@ -109,11 +96,9 @@ def test_refresh_retries_the_setup_when_the_entry_never_loaded() -> None:
 
 def test_refresh_reports_the_reason_when_the_retry_fails_too() -> None:
     """A session that is still dead has to say so rather than look fixed."""
-    entry = _entry(reason="TextNow rejected the session (HTTP 401)")
-    hass = _Hass(entry, {DOMAIN: {}})
-    connection = _Connection()
+    hass, entry, connection = _setup(reason="TextNow rejected the session (HTTP 401)")
 
-    asyncio.run(refresh(hass, connection, {"id": 1, "entry_id": "entry-1"}))
+    asyncio.run(refresh(hass, connection, _msg()))
 
     assert hass.config_entries.reloaded == ["entry-1"]
     assert connection.results[-1]["status"] == "reauth_required"
@@ -122,12 +107,12 @@ def test_refresh_reports_the_reason_when_the_retry_fails_too() -> None:
 
 def test_refresh_re_arms_an_account_that_was_slowed_down() -> None:
     """The escape hatch from the recovery interval, for the impatient."""
-    entry = _entry(state=ConfigEntryState.LOADED)
     coordinator = _Coordinator()
-    hass = _Hass(entry, {DOMAIN: {"entry-1": coordinator}})
-    connection = _Connection()
+    hass, _entry, connection = _setup(
+        state=ConfigEntryState.LOADED, coordinator=coordinator
+    )
 
-    asyncio.run(refresh(hass, connection, {"id": 1, "entry_id": "entry-1"}))
+    asyncio.run(refresh(hass, connection, _msg()))
 
     assert coordinator.rearmed == 1
     assert coordinator.refreshed == 1
@@ -136,9 +121,79 @@ def test_refresh_re_arms_an_account_that_was_slowed_down() -> None:
 
 
 def test_refresh_on_an_unknown_account_is_an_error() -> None:
-    hass = _Hass(_entry(), {DOMAIN: {}})
-    connection = _Connection()
+    hass, _entry, connection = _setup()
 
-    asyncio.run(refresh(hass, connection, {"id": 1, "entry_id": "nope"}))
+    asyncio.run(refresh(hass, connection, _msg("nope")))
+
+    assert connection.errors[0][0] == "not_found"
+
+
+# ------------------------------------------------------------- start_reauth
+
+
+def test_the_sign_in_button_opens_a_prompt() -> None:
+    hass, _entry, connection = _setup()
+
+    asyncio.run(start_reauth(hass, connection, _msg()))
+
+    assert connection.errors == []
+    assert connection.results[-1]["started"] is True
+    assert len(hass.flow.flows) == 1
+
+
+def test_the_sign_in_button_points_at_a_prompt_already_waiting() -> None:
+    """Two identical forms would be worse than one, but say which one it is."""
+    hass, _entry, connection = _setup()
+    hass.flow.add_flow(flow_id="already-open")
+
+    asyncio.run(start_reauth(hass, connection, _msg()))
+
+    assert connection.results[-1] == {
+        "success": True,
+        "started": False,
+        "flow_id": "already-open",
+    }
+    assert len(hass.flow.flows) == 1
+
+
+def test_the_sign_in_button_clears_wreckage_blocking_it() -> None:
+    """The reported bug: the button was correct to press and did nothing.
+
+    A flow that never reached a step is invisible to the user and to the
+    integrations page, but it was counted as a prompt already open, so the
+    button declined to start the one the user was asking for -- and Home
+    Assistant's own de-duplication would have refused too.
+    """
+    hass, _entry, connection = _setup()
+    hass.flow.add_flow(flow_id="orphan", step_id=None)
+
+    asyncio.run(start_reauth(hass, connection, _msg()))
+
+    assert "orphan" in hass.flow.aborted
+    assert connection.errors == []
+    assert connection.results[-1]["started"] is True
+    visible = [flow for flow in hass.flow.flows if "step_id" in flow]
+    assert len(visible) == 1
+
+
+def test_the_sign_in_button_says_so_when_no_prompt_appears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Silence is the one outcome that is not allowed."""
+    monkeypatch.setattr(websocket, "REAUTH_WAIT_ATTEMPTS", 2)
+    hass, entry, connection = _setup()
+    entry.async_start_reauth = lambda hass: None
+
+    asyncio.run(start_reauth(hass, connection, _msg()))
+
+    assert connection.results == []
+    assert connection.errors[0][0] == "reauth_not_started"
+    assert "Devices & services" in connection.errors[0][1]
+
+
+def test_the_sign_in_button_on_an_unknown_account_is_an_error() -> None:
+    hass, _entry, connection = _setup()
+
+    asyncio.run(start_reauth(hass, connection, _msg("nope")))
 
     assert connection.errors[0][0] == "not_found"

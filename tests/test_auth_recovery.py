@@ -19,6 +19,8 @@ import pytest
 from aiohttp import web
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
+from fakes import FakeHass
+
 from custom_components.textnow.const import AUTH_RECOVERY_INTERVAL
 from custom_components.textnow.coordinator import (
     TextNowDataUpdateCoordinator,
@@ -67,6 +69,8 @@ class _Account(TextNowDataUpdateCoordinator):
         self._session = session
         self.update_interval = None
         self.reauth_prompts = 0
+        self.hass = FakeHass()
+        self.entry = self.hass.make_entry()
 
     async def _poll_unread_messages(self) -> None:
         await async_api_request(
