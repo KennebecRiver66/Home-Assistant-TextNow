@@ -17,11 +17,18 @@ from homeassistant.helpers import selector
 from .const import (
     DOMAIN,
     CONF_COOKIES,
+    CONF_KEEPALIVE_DAYS,
+    CONF_KEEPALIVE_MESSAGE,
+    CONF_KEEPALIVE_PHONE,
     CONF_POLLING_INTERVAL,
     CONF_USERNAME,
     COOKIE_HELP_URL,
+    DEFAULT_KEEPALIVE_DAYS,
+    DEFAULT_KEEPALIVE_MESSAGE,
     DEFAULT_POLLING_INTERVAL,
+    MAX_KEEPALIVE_DAYS,
     MAX_POLLING_INTERVAL,
+    MIN_KEEPALIVE_DAYS,
     MIN_POLLING_INTERVAL,
 )
 from .coordinator import (
@@ -188,6 +195,50 @@ def contact_schema() -> vol.Schema:
             vol.Required("name"): selector.TextSelector(),
             vol.Required("phone"): selector.TextSelector(
                 selector.TextSelectorConfig(type=selector.TextSelectorType.TEL)
+            ),
+        }
+    )
+
+
+def keepalive_schema(contacts: dict[str, dict[str, Any]]) -> vol.Schema:
+    """Return the schema for the keep-alive settings.
+
+    The number can be picked from the contacts or typed in, because the
+    person who should get these messages is not necessarily someone the
+    automations text.
+    """
+    options = [
+        selector.SelectOptionDict(
+            value=data.get("phone", ""),
+            label=(
+                f"{data.get('name', 'Unknown')} — "
+                f"{readable_phone_number(data.get('phone', ''))}"
+            ),
+        )
+        for data in contacts.values()
+        if data.get("phone")
+    ]
+
+    return vol.Schema(
+        {
+            vol.Optional(CONF_KEEPALIVE_PHONE): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=options,
+                    custom_value=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(CONF_KEEPALIVE_DAYS): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=MIN_KEEPALIVE_DAYS,
+                    max=MAX_KEEPALIVE_DAYS,
+                    step=1,
+                    unit_of_measurement="days",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(CONF_KEEPALIVE_MESSAGE): selector.TextSelector(
+                selector.TextSelectorConfig(multiline=True)
             ),
         }
     )
@@ -377,7 +428,67 @@ class TextNowOptionsFlowHandler(config_entries.OptionsFlow):
         A menu is one click per choice, where a dropdown plus Submit was two.
         """
         return self.async_show_menu(
-            step_id="init", menu_options=["account", "contacts"]
+            step_id="init", menu_options=["account", "contacts", "keepalive"]
+        )
+
+    async def async_step_keepalive(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Set up the message that keeps the TextNow number in use."""
+        errors: dict[str, str] = {}
+        storage = TextNowStorage(self.hass, self.config_entry.entry_id)
+        contacts = await storage.async_get_contacts()
+
+        if user_input is not None:
+            phone = str(user_input.get(CONF_KEEPALIVE_PHONE) or "").strip()
+            formatted = ""
+
+            if phone:
+                try:
+                    formatted = format_phone_number(phone)
+                except ValueError:
+                    errors[CONF_KEEPALIVE_PHONE] = "invalid_phone"
+
+            if not errors:
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data={
+                        **self.config_entry.data,
+                        CONF_KEEPALIVE_PHONE: formatted,
+                        CONF_KEEPALIVE_DAYS: int(
+                            user_input.get(CONF_KEEPALIVE_DAYS)
+                            or DEFAULT_KEEPALIVE_DAYS
+                        ),
+                        CONF_KEEPALIVE_MESSAGE: (
+                            str(user_input.get(CONF_KEEPALIVE_MESSAGE) or "").strip()
+                            or DEFAULT_KEEPALIVE_MESSAGE
+                        ),
+                    },
+                )
+                # The reload is what makes the new setting take effect, and it
+                # is also what sends the first message when one is turned on.
+                self.hass.config_entries.async_schedule_reload(
+                    self.config_entry.entry_id
+                )
+                return self.async_create_entry(title="", data={})
+
+        current = self.config_entry.data
+        suggested = user_input or {
+            CONF_KEEPALIVE_PHONE: current.get(CONF_KEEPALIVE_PHONE, ""),
+            CONF_KEEPALIVE_DAYS: current.get(
+                CONF_KEEPALIVE_DAYS, DEFAULT_KEEPALIVE_DAYS
+            ),
+            CONF_KEEPALIVE_MESSAGE: current.get(
+                CONF_KEEPALIVE_MESSAGE, DEFAULT_KEEPALIVE_MESSAGE
+            ),
+        }
+
+        return self.async_show_form(
+            step_id="keepalive",
+            data_schema=self.add_suggested_values_to_schema(
+                keepalive_schema(contacts), suggested
+            ),
+            errors=errors,
         )
 
     async def async_step_account(

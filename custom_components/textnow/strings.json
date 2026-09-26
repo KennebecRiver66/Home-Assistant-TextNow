@@ -34,7 +34,7 @@
       "invalid_auth": "TextNow rejected these credentials. The cookies may already have expired, or the username may not match the account they belong to.",
       "cannot_connect": "Could not reach TextNow. Check the internet connection and try again.",
       "unexpected_response": "TextNow replied with something unexpected. See the Home Assistant log for the details.",
-      "invalid_phone": "Phone number must be exactly 10 digits",
+      "invalid_phone": "Enter a 10-digit phone number, for example (555) 123-4567.",
       "unknown": "Unexpected error. See the Home Assistant log for the details."
     },
     "abort": {
@@ -50,7 +50,8 @@
         "description": "What would you like to change?",
         "menu_options": {
           "account": "Connection and message checking",
-          "contacts": "Contacts"
+          "contacts": "Contacts",
+          "keepalive": "Keep the number in use"
         }
       },
       "account": {
@@ -75,6 +76,20 @@
           "pick_edit": "Edit a contact",
           "pick_delete": "Remove a contact",
           "init": "Back"
+        }
+      },
+      "keepalive": {
+        "title": "Keep the number in use",
+        "description": "TextNow takes a number back if it sits unused, which would break every automation pointing at it. Home Assistant can send one short text to a number you choose whenever nothing else has gone out for a while.\n\nAnything you or your automations send counts, so in a busy house this may never need to send anything at all.\n\nLeave the number empty to turn this off.",
+        "data": {
+          "keepalive_phone": "Send it to",
+          "keepalive_days": "Only when nothing was sent for",
+          "keepalive_message": "Message to send"
+        },
+        "data_description": {
+          "keepalive_phone": "Pick one of your contacts or type any 10-digit number. Your own phone is the usual choice. Leave empty to turn this off.",
+          "keepalive_days": "Counted from the last message this account sent, for any reason. TextNow does not publish how long a number may sit idle, so the default leaves room under a week.",
+          "keepalive_message": "Keep it short and say where it came from, so nobody mistakes it for spam."
         }
       },
       "select_contact": {
@@ -123,7 +138,7 @@
       "invalid_auth": "TextNow rejected these credentials. The cookies may already have expired, or the username may not match the account they belong to.",
       "cannot_connect": "Could not reach TextNow. Check the internet connection and try again.",
       "unexpected_response": "TextNow replied with something unexpected. See the Home Assistant log for the details.",
-      "invalid_phone": "Phone number must be exactly 10 digits",
+      "invalid_phone": "Enter a 10-digit phone number, for example (555) 123-4567.",
       "unknown": "Unexpected error. See the Home Assistant log for the details."
     },
     "abort": {
