@@ -7,7 +7,7 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 
@@ -36,16 +36,23 @@ STATUS_OFFLINE = "offline"
 STATUS_DISABLED = "disabled"
 
 
-def _entry_status(entry: ConfigEntry, coordinator: Any) -> str:
+def _entry_status(hass: HomeAssistant, entry: ConfigEntry, coordinator: Any) -> str:
     """Return one status for an account, in the order that matters to a user.
 
-    Needing new cookies outranks being offline, because it is the only one
-    the user can do something about.
+    Needing a new sign-in outranks being offline, because it is the only one
+    the user can do something about. An expired session stops the entry from
+    loading at all, so the state has to be read without a coordinator too.
     """
-    if entry.state is ConfigEntryState.SETUP_ERROR or (
-        coordinator is not None and coordinator.auth_failed
+    if entry.disabled_by is not None:
+        return STATUS_DISABLED
+    if (
+        entry.state is ConfigEntryState.SETUP_ERROR
+        or entry.async_get_active_flows(hass, {SOURCE_REAUTH})
+        or (coordinator is not None and coordinator.auth_failed)
     ):
         return STATUS_REAUTH_REQUIRED
+    if entry.state is ConfigEntryState.SETUP_RETRY:
+        return STATUS_OFFLINE
     if entry.state is not ConfigEntryState.LOADED or coordinator is None:
         return STATUS_DISABLED
     if not coordinator.last_update_success:
@@ -70,7 +77,7 @@ async def websocket_get_entries(
         last_error = getattr(coordinator, "last_exception", None)
         last_success = getattr(coordinator, "last_success", None)
         interval = getattr(coordinator, "update_interval", None)
-        status = _entry_status(entry, coordinator)
+        status = _entry_status(hass, entry, coordinator)
         result.append(
             {
                 "entry_id": entry.entry_id,
@@ -126,7 +133,7 @@ async def websocket_refresh(
     connection.send_result(
         msg["id"],
         {
-            "status": _entry_status(entry, coordinator),
+            "status": _entry_status(hass, entry, coordinator),
             "last_error": (
                 str(coordinator.last_exception) if coordinator.last_exception else ""
             ),

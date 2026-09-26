@@ -10,10 +10,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse, callback
 from homeassistant.helpers import (
+    config_validation as cv,
     device_registry as dr,
     entity_registry as er,
     issue_registry as ir,
 )
+from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 from homeassistant.util import slugify
 
@@ -28,6 +30,9 @@ from .storage import TextNowStorage
 
 _LOGGER = logging.getLogger(__name__)
 
+# An account is added from the UI; there is nothing to configure in YAML.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 # Panel configuration
@@ -39,6 +44,31 @@ SERVICE_SEND = "send"
 SERVICE_SEND_MENU = "send_menu"
 
 DATA_WEBSOCKET_REGISTERED = "_websocket_registered"
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up the pieces that work without a live TextNow session.
+
+    The sidebar panel is where the user is told that the session expired, so
+    it has to be there even when every account is waiting to be signed in
+    again. Setting it up here instead of per entry keeps it in the sidebar
+    when async_setup_entry stops early to ask for a reauth.
+    """
+    hass.data.setdefault(DOMAIN, {})
+
+    async_setup_services(hass)
+    async_setup_websocket_api(hass)
+
+    try:
+        await async_register_panel(hass)
+    except Exception:  # noqa: BLE001 - the panel is cosmetic
+        _LOGGER.warning(
+            "The TextNow sidebar panel could not be registered; "
+            "sensors and services are unaffected",
+            exc_info=True,
+        )
+
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -66,18 +96,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await _async_migrate_entity_ids(hass, entry)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-    async_setup_services(hass)
-    async_setup_websocket_api(hass)
-
-    try:
-        await async_register_panel(hass)
-    except Exception:  # noqa: BLE001 - the panel is cosmetic
-        _LOGGER.warning(
-            "The TextNow sidebar panel could not be registered; "
-            "sensors and services are unaffected",
-            exc_info=True,
-        )
 
     return True
 
