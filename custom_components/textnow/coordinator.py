@@ -230,6 +230,12 @@ def build_headers(
     return headers
 
 
+def _is_bot_block(body: str) -> bool:
+    """Return whether a refusal came from PerimeterX rather than TextNow."""
+    lowered = body.lower()
+    return any(marker in lowered for marker in BOT_BLOCK_MARKERS)
+
+
 def _raise_for_auth_status(status: int, body: str) -> None:
     """Raise the error that matches a rejected request.
 
@@ -237,8 +243,7 @@ def _raise_for_auth_status(status: int, body: str) -> None:
     protection stepping in; both need fresh cookies but the advice differs.
     """
     if status == 403:
-        lowered = body.lower()
-        if any(marker in lowered for marker in BOT_BLOCK_MARKERS):
+        if _is_bot_block(body):
             raise TextNowBlockedError(
                 "TextNow's bot protection blocked Home Assistant (HTTP 403). "
                 "Fresh cookies from a browser session are needed"
@@ -318,8 +323,20 @@ async def async_api_request(
                 if check_auth and (
                     response.status in AUTH_STATUSES or response.status == 403
                 ):
-                    _raise_for_auth_status(response.status, await response.text())
-                if response.status not in RETRY_STATUSES:
+                    body = await response.text()
+                    # A 403 that is not the bot protection is usually the CSRF
+                    # token and the cookie disagreeing. The refreshed token
+                    # arrived with this very reply and has just been absorbed,
+                    # so one more attempt settles it rather than demanding a
+                    # whole new sign-in.
+                    if (
+                        response.status != 403
+                        or attempt >= attempts
+                        or _is_bot_block(body)
+                    ):
+                        _raise_for_auth_status(response.status, body)
+                    last_error = "HTTP 403 (CSRF token refreshed, retrying)"
+                elif response.status not in RETRY_STATUSES:
                     if response.status >= 400:
                         body = await response.text()
                         raise TextNowApiError(
@@ -328,7 +345,8 @@ async def async_api_request(
                     if not parse_json:
                         return await response.read()
                     return _parse_json_body(await response.text())
-                last_error = f"HTTP {response.status}"
+                else:
+                    last_error = f"HTTP {response.status}"
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
             last_error = f"{type(err).__name__}: {err}"
 

@@ -118,7 +118,8 @@ def test_bot_protection_is_reported_separately() -> None:
 
 def test_plain_forbidden_is_an_auth_error() -> None:
     """A 403 without bot markers still means new cookies are needed."""
-    session = _FakeSession([_FakeResponse(403, '{"error_code":"FORBIDDEN"}')])
+    forbidden = '{"error_code":"FORBIDDEN"}'
+    session = _FakeSession([_FakeResponse(403, forbidden) for _ in range(3)])
 
     with pytest.raises(TextNowAuthError) as err:
         _run(
@@ -128,6 +129,63 @@ def test_plain_forbidden_is_an_auth_error() -> None:
         )
 
     assert not isinstance(err.value, TextNowBlockedError)
+
+
+def test_a_csrf_mismatch_is_retried_with_the_refreshed_token() -> None:
+    """A lone 403 is usually the token and the cookie disagreeing.
+
+    TextNow sends the replacement token on the very reply that refuses the
+    request, so retrying once with it settles the call. Demanding a whole new
+    sign-in for that would be sending the user to Chrome over nothing.
+    """
+    tokens: list[str] = []
+
+    def _headers_with_token() -> dict[str, str]:
+        tokens.append(f"token-{len(tokens)}")
+        return {"X-CSRF-Token": tokens[-1]}
+
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                403,
+                '{"error_code":"FORBIDDEN"}',
+                set_cookies={"XSRF-TOKEN": "refreshed"},
+            ),
+            _FakeResponse(200, '{"messages":[]}'),
+        ]
+    )
+    rotated: list[str] = []
+
+    result = _run(
+        async_api_request(
+            session,
+            "GET",
+            "https://example.invalid",
+            headers_factory=_headers_with_token,
+            cookie_sink=lambda jar: rotated.append(jar["XSRF-TOKEN"].value),
+        )
+    )
+
+    assert result == {"messages": []}
+    assert len(session.calls) == 2
+    # The refreshed token reached the caller before the second attempt built
+    # its headers, which is the whole point of retrying rather than failing.
+    assert rotated == ["refreshed"]
+    assert tokens == ["token-0", "token-1"]
+
+
+def test_bot_protection_is_never_retried() -> None:
+    """PerimeterX will not change its mind, and hammering it makes it worse."""
+    session = _FakeSession([_FakeResponse(403, PERIMETERX_BODY)])
+
+    with pytest.raises(TextNowBlockedError):
+        _run(
+            async_api_request(
+                session, "GET", "https://example.invalid", headers_factory=_headers
+            )
+        )
+
+    assert len(session.calls) == 1
 
 
 def test_upload_host_rejection_is_not_blamed_on_the_session() -> None:
