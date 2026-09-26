@@ -166,7 +166,8 @@ does not go quiet:
 - `sensor.textnow_status` reads `New cookies needed`, so it can be used in a
   dashboard card or an alert automation
 - If you dismissed the re-authentication prompt, press **Fix this now** on the
-  panel's Connection tab to bring it back
+  panel's Connection tab to bring it back, or **Check now** to retry the
+  connection as it stands
 
 ---
 
@@ -750,8 +751,9 @@ restarted:
   now slows to every 30 minutes instead of stopping, so a session that works
   again is noticed, and a re-authentication prompt that was dismissed comes
   back. **Fix this now** on the panel's Connection tab re-opens the prompt at
-  any time, and **Send a message** is no longer greyed out while the
-  connection status is merely in doubt.
+  any time, **Check now** retries an account that failed to load at all
+  instead of reporting that it is not loaded, and **Send a message** is no
+  longer greyed out while the connection status is merely in doubt.
 - **A bad cookie paste can no longer break anything.** A Windows
   *Copy as cURL (cmd)* paste used to crash the form with `CookieError:
   Illegal key`, and a stored paste that had already gone wrong broke every
