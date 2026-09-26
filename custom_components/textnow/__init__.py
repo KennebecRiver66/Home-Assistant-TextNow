@@ -6,6 +6,7 @@ import os
 
 from homeassistant.components import panel_custom
 from homeassistant.components.http import StaticPathConfig
+from homeassistant.components.notify import DOMAIN as NOTIFY_DOMAIN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse, callback
@@ -15,6 +16,7 @@ from homeassistant.helpers import (
     entity_registry as er,
     issue_registry as ir,
 )
+from homeassistant.helpers.service import async_set_service_schema
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 from homeassistant.util import slugify
@@ -33,7 +35,7 @@ _LOGGER = logging.getLogger(__name__)
 # An account is added from the UI; there is nothing to configure in YAML.
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.NOTIFY]
 
 # Panel configuration
 PANEL_URL = "/textnow_panel"
@@ -205,9 +207,12 @@ def async_setup_services(hass: HomeAssistant) -> None:
         return
 
     from .services import (
+        async_notify,
         async_resolve_coordinator,
         async_send_menu,
         async_send_message,
+        NOTIFY_SEND_SCHEMA,
+        NOTIFY_SERVICE_DESCRIPTION,
         SERVICE_SEND_SCHEMA,
         SERVICE_SEND_MENU_SCHEMA,
     )
@@ -222,6 +227,11 @@ def async_setup_services(hass: HomeAssistant) -> None:
         coordinator = await async_resolve_coordinator(hass, call.data)
         return await async_send_menu(hass, coordinator, call.data)
 
+    async def notify_service(call: ServiceCall) -> None:
+        """Handle notify.textnow, the standard notification entry point."""
+        coordinator = await async_resolve_coordinator(hass, call.data)
+        await async_notify(hass, coordinator, call.data)
+
     hass.services.async_register(
         DOMAIN, SERVICE_SEND, send_message_service, schema=SERVICE_SEND_SCHEMA
     )
@@ -232,3 +242,15 @@ def async_setup_services(hass: HomeAssistant) -> None:
         schema=SERVICE_SEND_MENU_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
+
+    # notify.textnow, next to notify.<anything else the user has>. It is
+    # registered for the integration rather than per account, so it exists
+    # before the first poll and while a session is waiting for new cookies;
+    # the call itself reports when no account can send.
+    if not hass.services.has_service(NOTIFY_DOMAIN, DOMAIN):
+        hass.services.async_register(
+            NOTIFY_DOMAIN, DOMAIN, notify_service, schema=NOTIFY_SEND_SCHEMA
+        )
+        async_set_service_schema(
+            hass, NOTIFY_DOMAIN, DOMAIN, NOTIFY_SERVICE_DESCRIPTION
+        )

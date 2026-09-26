@@ -8,6 +8,7 @@
   "dependencies": [
     "http",
     "frontend",
+    "notify",
     "panel_custom"
   ],
   "documentation": "https://github.com/KennebecRiver66/Home-Assistant-TextNow",
