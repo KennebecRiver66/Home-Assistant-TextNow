@@ -21,6 +21,7 @@
 - [Initial Configuration](#initial-configuration)
   - [Getting your cookies](#getting-your-cookies)
   - [When the session expires](#when-the-session-expires)
+- [The TextNow panel](#the-textnow-panel)
 - [Managing Contacts](#managing-contacts)
 - [Services](#services)
   - [textnow.send](#textnowsend)
@@ -134,17 +135,55 @@ does not go quiet:
 
 ---
 
+## The TextNow panel
+
+After the first account is added, **TextNow** appears in the Home Assistant
+sidebar. It is the one place that answers "is this working?" and "who can it
+text?", and it needs no YAML.
+
+![The contacts tab of the TextNow panel](images/panel-contacts.png)
+
+**Contacts** lists everyone the integration can text. Each row sends a
+message, edits the name or number, or removes the contact. Adding one is a
+name and ten digits; the number is formatted as it is typed and each contact
+gets its own sensor.
+
+**Connection** shows the account, when messages were last checked, how often
+they are being checked right now, and the last error if there was one.
+
+![The connection tab of the TextNow panel](images/panel-connection.png)
+
+**Help** has the five-step cookie walkthrough, so the instructions are still
+reachable when the integration is the only thing you have open.
+
+The panel works in light and dark themes, follows the theme's colours, and is
+laid out for a phone as well as a desktop.
+
+### Seeing the status at a glance
+
+Every state is written out in plain language rather than left to a colour.
+
+![The panel asking for a new sign-in](images/panel-sign-in-needed.png)
+
+| Status | What it means |
+|--------|---------------|
+| **Connected** | Messages are being sent and received |
+| **Sign-in needed** | TextNow signed the saved session out; paste a fresh cookie line to fix it |
+| **Offline** | TextNow could not be reached; Home Assistant is retrying on its own, waiting longer after each failure |
+| **Not running** | The account is switched off or failed to start |
+
+An account that needs a new sign-in keeps its panel, its contacts and its
+automations. **Fix this now** goes straight to the re-authentication prompt.
+
+---
+
 ## Managing Contacts
 
-### Adding a Contact
+From the panel: open **TextNow** in the sidebar, then **Add contact** on the
+Contacts tab. Enter a name and a 10-digit number and it is saved right away.
 
-1. Go to **Settings** → **Devices & Services** → **TextNow**
-2. Click **Configure**
-3. Select **Add Contact**
-4. Enter:
-   - **Name**: Contact's name (e.g., "John")
-   - **Phone**: 10-digit phone number (e.g., "5551234567")
-5. Click **Submit**
+From the settings pages: **Settings** → **Devices & Services** → **TextNow** →
+**Configure** → **Contacts**, which can also add, edit and remove contacts.
 
 Each contact creates a sensor: `sensor.textnow_<name>`
 
