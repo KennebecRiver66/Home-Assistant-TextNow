@@ -22,6 +22,7 @@
   - [Getting your cookies](#getting-your-cookies)
   - [When the session expires](#when-the-session-expires)
 - [The TextNow panel](#the-textnow-panel)
+- [Keeping your TextNow number](#keeping-your-textnow-number)
 - [Managing Contacts](#managing-contacts)
 - [Services](#services)
   - [textnow.send](#textnowsend)
@@ -149,7 +150,8 @@ name and ten digits; the number is formatted as it is typed and each contact
 gets its own sensor.
 
 **Connection** shows the account, when messages were last checked, how often
-they are being checked right now, and the last error if there was one.
+they are being checked right now, whether the number is being kept in use, and
+the last error if there was one.
 
 ![The connection tab of the TextNow panel](images/panel-connection.png)
 
@@ -174,6 +176,45 @@ Every state is written out in plain language rather than left to a colour.
 
 An account that needs a new sign-in keeps its panel, its contacts and its
 automations. **Fix this now** goes straight to the re-authentication prompt.
+
+---
+
+## Keeping your TextNow number
+
+A free TextNow number is only yours while it is being used. Leave it idle and
+TextNow returns it to the pool, which costs you the number your contacts reply
+to and breaks every automation pointed at it.
+
+Only **sending** counts. Receiving messages does not. That makes the risk worst
+for exactly the setups that need the integration most: a number reserved for
+power cuts, water leaks or alarms can quietly expire in between the emergencies
+it exists for.
+
+The integration can guard against this. Go to **Settings** → **Devices &
+Services** → **TextNow** → **Configure** → **Keep the number in use**:
+
+| Setting | Meaning |
+|---------|---------|
+| **Send it to** | A contact, or any 10-digit number. Your own phone is the usual choice. Leave it empty to turn the whole thing off |
+| **Only when nothing was sent for** | How many idle days may pass first. Default 5, adjustable from 1 to 30 |
+| **Message to send** | The text itself. The default says where it came from so it does not read as spam |
+
+Anything the account sends resets the clock — a service call, a menu, an MMS,
+or a message sent from the panel. A house whose automations text every couple
+of days will never send one of these.
+
+The default is five days rather than seven on purpose: TextNow does not publish
+how long a number may sit idle and the rule has changed over the years, so the
+default leaves margin instead of sitting on the edge of it.
+
+The Connection tab says so when nothing is guarding the number:
+
+![The panel warning that the number could be reclaimed](images/panel-number-at-risk.png)
+
+Once it is turned on, the same place shows when the last message went out and
+when the next one is due, with a **Send one now** button to test it. `sensor.textnow_status` carries the same information in its
+`last_message_sent`, `keepalive_phone` and `keepalive_due` attributes, so an
+automation can watch it.
 
 ---
 
@@ -678,6 +719,8 @@ Also new in 1.2.0:
 - Expired sessions raise a repair notice and a re-authentication prompt
   instead of silently logging 401s
 - Diagnostics can be downloaded from the integration page
+- An optional keep-alive message stops TextNow reclaiming an idle number, see
+  [Keeping your TextNow number](#keeping-your-textnow-number)
 
 ---
 
