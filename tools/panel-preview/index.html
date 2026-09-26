@@ -9,7 +9,7 @@
   then open http://127.0.0.1:8899/?s=healthy&theme=light
 
   Query parameters:
-    s=healthy|reauth|offline|multi|empty|nocontacts   which account state to mock
+    s=healthy|reauth|failed|offline|multi|empty|nocontacts   which account state to mock
     theme=light|dark                                  which Home Assistant theme
     tab=contacts|status|help                          open a tab
     dialog=send|delete|edit                           open a dialog
@@ -108,6 +108,21 @@
             last_error:
               "TextNow no longer accepts the saved browser session (HTTP 401)",
             last_success: ago(7300),
+            // Slowed to the recovery interval rather than stopped
+            current_interval: 1800,
+          }),
+        ],
+        // A session already dead when Home Assistant started, so the entry
+        // never loaded and there is no coordinator behind it
+        failed: [
+          account({
+            status: "reauth_required",
+            loaded: false,
+            connected: false,
+            needs_reauth: true,
+            last_error:
+              "TextNow rejected the session (HTTP 401); the saved cookies are no longer valid",
+            last_success: "",
             current_interval: null,
           }),
         ],

@@ -30,6 +30,7 @@ COMMANDS = [
     ),
     ("textnow/refresh", {"entry_id": "abc123"}),
     ("textnow/keepalive_now", {"entry_id": "abc123"}),
+    ("textnow/start_reauth", {"entry_id": "abc123"}),
 ]
 
 

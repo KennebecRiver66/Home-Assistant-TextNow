@@ -35,6 +35,7 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_contacts_delete)
     websocket_api.async_register_command(hass, websocket_send_test)
     websocket_api.async_register_command(hass, websocket_refresh)
+    websocket_api.async_register_command(hass, websocket_start_reauth)
     websocket_api.async_register_command(hass, websocket_keepalive_now)
 
 
@@ -50,13 +51,22 @@ def _entry_status(hass: HomeAssistant, entry: ConfigEntry, coordinator: Any) -> 
     Needing a new sign-in outranks being offline, because it is the only one
     the user can do something about. An expired session stops the entry from
     loading at all, so the state has to be read without a coordinator too.
+
+    Home Assistant's own view of the entry comes first. The coordinator's
+    auth_failed is only consulted about a poll that actually failed: as a
+    free-standing flag it is a second copy of a truth Home Assistant already
+    tracks, and it is the copy that drifts.
     """
     if entry.disabled_by is not None:
         return STATUS_DISABLED
     if (
         entry.state is ConfigEntryState.SETUP_ERROR
         or entry.async_get_active_flows(hass, {SOURCE_REAUTH})
-        or (coordinator is not None and coordinator.auth_failed)
+        or (
+            coordinator is not None
+            and coordinator.auth_failed
+            and not coordinator.last_update_success
+        )
     ):
         return STATUS_REAUTH_REQUIRED
     if entry.state is ConfigEntryState.SETUP_RETRY:
@@ -149,10 +159,25 @@ async def websocket_refresh(
 
     coordinator = hass.data.get(DOMAIN, {}).get(entry_id)
     if coordinator is None:
-        connection.send_error(
-            msg["id"], "not_loaded", "This account is not currently loaded"
+        # An expired session stops the entry loading at all, so there is no
+        # coordinator to refresh. Retrying the setup is what this button means
+        # in that state: if the session works again the account comes back, and
+        # if it does not, Home Assistant re-offers the sign-in prompt.
+        await hass.config_entries.async_reload(entry_id)
+        coordinator = hass.data.get(DOMAIN, {}).get(entry_id)
+        connection.send_result(
+            msg["id"],
+            {
+                "status": _entry_status(hass, entry, coordinator),
+                "last_error": str(entry.reason or ""),
+            },
         )
         return
+
+    # Re-arm first: an account that has been slowed to the recovery interval
+    # should go straight back to normal if this check works, rather than
+    # staying slow until the next one.
+    coordinator.async_rearm_polling()
 
     # async_refresh reports through the coordinator rather than raising, so a
     # failed check leaves the panel to show the status it produced.
@@ -166,6 +191,36 @@ async def websocket_refresh(
             ),
         },
     )
+
+
+@websocket_api.websocket_command(
+    {
+        "type": "textnow/start_reauth",
+        vol.Required("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_start_reauth(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Open the sign-in form for an account.
+
+    Without this the panel could only send the user to the integrations
+    page, which shows a reauth prompt when Home Assistant happens to have
+    one open and nothing at all when it does not.
+    """
+    entry_id = msg["entry_id"]
+
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if not entry or entry.domain != DOMAIN:
+        connection.send_error(msg["id"], "not_found", "Config entry not found")
+        return
+
+    # Starting a second one would leave the user with two identical prompts.
+    if not entry.async_get_active_flows(hass, {SOURCE_REAUTH}):
+        entry.async_start_reauth(hass)
+
+    connection.send_result(msg["id"], {"success": True})
 
 
 @websocket_api.websocket_command(
@@ -440,7 +495,12 @@ async def websocket_send_test(
     
     # Get coordinator
     if DOMAIN not in hass.data or entry_id not in hass.data[DOMAIN]:
-        connection.send_error(msg["id"], "not_loaded", "Integration not loaded")
+        connection.send_error(
+            msg["id"],
+            "not_loaded",
+            "This account is waiting to be signed in again, so nothing can be "
+            "sent from it yet",
+        )
         return
     
     coordinator = hass.data[DOMAIN][entry_id]

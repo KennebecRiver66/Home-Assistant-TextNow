@@ -13,6 +13,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.textnow import coordinator as coordinator_module
+from custom_components.textnow.const import AUTH_RECOVERY_INTERVAL
 from custom_components.textnow.coordinator import (
     TextNowApiError,
     TextNowAuthError,
@@ -117,7 +118,8 @@ def test_bot_protection_is_reported_separately() -> None:
 
 def test_plain_forbidden_is_an_auth_error() -> None:
     """A 403 without bot markers still means new cookies are needed."""
-    session = _FakeSession([_FakeResponse(403, '{"error_code":"FORBIDDEN"}')])
+    forbidden = '{"error_code":"FORBIDDEN"}'
+    session = _FakeSession([_FakeResponse(403, forbidden) for _ in range(3)])
 
     with pytest.raises(TextNowAuthError) as err:
         _run(
@@ -127,6 +129,63 @@ def test_plain_forbidden_is_an_auth_error() -> None:
         )
 
     assert not isinstance(err.value, TextNowBlockedError)
+
+
+def test_a_csrf_mismatch_is_retried_with_the_refreshed_token() -> None:
+    """A lone 403 is usually the token and the cookie disagreeing.
+
+    TextNow sends the replacement token on the very reply that refuses the
+    request, so retrying once with it settles the call. Demanding a whole new
+    sign-in for that would be sending the user to Chrome over nothing.
+    """
+    tokens: list[str] = []
+
+    def _headers_with_token() -> dict[str, str]:
+        tokens.append(f"token-{len(tokens)}")
+        return {"X-CSRF-Token": tokens[-1]}
+
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                403,
+                '{"error_code":"FORBIDDEN"}',
+                set_cookies={"XSRF-TOKEN": "refreshed"},
+            ),
+            _FakeResponse(200, '{"messages":[]}'),
+        ]
+    )
+    rotated: list[str] = []
+
+    result = _run(
+        async_api_request(
+            session,
+            "GET",
+            "https://example.invalid",
+            headers_factory=_headers_with_token,
+            cookie_sink=lambda jar: rotated.append(jar["XSRF-TOKEN"].value),
+        )
+    )
+
+    assert result == {"messages": []}
+    assert len(session.calls) == 2
+    # The refreshed token reached the caller before the second attempt built
+    # its headers, which is the whole point of retrying rather than failing.
+    assert rotated == ["refreshed"]
+    assert tokens == ["token-0", "token-1"]
+
+
+def test_bot_protection_is_never_retried() -> None:
+    """PerimeterX will not change its mind, and hammering it makes it worse."""
+    session = _FakeSession([_FakeResponse(403, PERIMETERX_BODY)])
+
+    with pytest.raises(TextNowBlockedError):
+        _run(
+            async_api_request(
+                session, "GET", "https://example.invalid", headers_factory=_headers
+            )
+        )
+
+    assert len(session.calls) == 1
 
 
 def test_upload_host_rejection_is_not_blamed_on_the_session() -> None:
@@ -328,8 +387,47 @@ def test_expired_session_asks_home_assistant_for_reauth() -> None:
 
     assert coordinator.auth_failed is True
     assert coordinator.reported == ["TextNowAuthError"]
-    # Polling stops so an expired session cannot make thousands of requests
-    assert coordinator.update_interval is None
+    # Polling slows right down so an expired session cannot make thousands of
+    # requests a day, but it must not stop: see the deadlock test below.
+    assert coordinator.update_interval == AUTH_RECOVERY_INTERVAL
+
+
+def test_an_expired_session_can_recover_without_a_restart() -> None:
+    """The bug that locked an account out until Home Assistant restarted.
+
+    auth_failed was only ever cleared by a poll, and the auth failure set
+    update_interval to None, which stopped every future poll. Pausing removed
+    the one mechanism that could clear the flag, so the panel said "reconnect"
+    for ever and the send controls stayed disabled.
+    """
+    coordinator = _TestableCoordinator(TextNowAuthError("expired"))
+
+    with pytest.raises(ConfigEntryAuthFailed):
+        _run(coordinator._async_update_data())
+    assert coordinator.auth_failed is True
+
+    # Home Assistant can only schedule another poll if an interval survives.
+    assert coordinator.update_interval is not None
+
+    # That next poll is what notices the session working again.
+    coordinator._failure = None
+    _run(coordinator._async_update_data())
+
+    assert coordinator.auth_failed is False
+    assert coordinator.update_interval.total_seconds() == 30
+
+
+def test_the_refresh_button_re_arms_a_slowed_account() -> None:
+    """The panel's refresh must not leave the account on the slow interval."""
+    coordinator = _TestableCoordinator(TextNowAuthError("expired"))
+
+    with pytest.raises(ConfigEntryAuthFailed):
+        _run(coordinator._async_update_data())
+
+    coordinator.async_rearm_polling()
+
+    assert coordinator.auth_failed is False
+    assert coordinator.update_interval.total_seconds() == 30
 
 
 def test_only_the_bot_block_gets_a_repair_card_of_its_own(monkeypatch) -> None:

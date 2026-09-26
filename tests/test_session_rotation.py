@@ -98,7 +98,6 @@ async def _poll(client: _Client, session: aiohttp.ClientSession, base: str) -> A
         "GET",
         f"{base}/api/users/example/messages",
         headers_factory=lambda: build_headers(client._cookies),
-        cookies_factory=lambda: client._cookies,
         cookie_sink=client._async_absorb_cookies,
         attempts=1,
     )
@@ -184,7 +183,6 @@ def test_sending_uses_the_rotated_session() -> None:
                 "POST",
                 f"{base}/api/users/example/messages",
                 headers_factory=lambda: build_headers(client._cookies),
-                cookies_factory=lambda: client._cookies,
                 cookie_sink=client._async_absorb_cookies,
                 json_data={"message": "hello", "contact_value": "+15555550100"},
                 attempts=1,

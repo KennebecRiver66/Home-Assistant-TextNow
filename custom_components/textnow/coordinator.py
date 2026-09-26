@@ -5,8 +5,9 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
-from datetime import datetime, timedelta
-from http.cookies import SimpleCookie
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
+from http.cookies import Morsel, SimpleCookie
 from typing import Any, Final
 from urllib.parse import unquote
 
@@ -44,10 +45,17 @@ from .const import (
     DEFAULT_KEEPALIVE_MESSAGE,
     DEFAULT_POLLING_INTERVAL,
     KEEPALIVE_RETRY_INTERVAL,
+    AUTH_RECOVERY_INTERVAL,
     MAX_BACKOFF_INTERVAL,
     MAX_KEEPALIVE_DAYS,
     MIN_KEEPALIVE_DAYS,
     MIN_POLLING_INTERVAL,
+)
+from .cookies import (
+    cookie_header,
+    is_valid_cookie_name,
+    is_valid_cookie_value,
+    sanitize_cookies,
 )
 from .parsing import parse_reply
 from .storage import TextNowStorage
@@ -150,7 +158,41 @@ def cookies_from_entry_data(data: dict[str, Any]) -> dict[str, str]:
     for key, name in COOKIE_KEYS.items():
         if data.get(key) and name not in cookies:
             cookies[name] = str(data[key])
-    return cookies
+    # An entry saved by an older release may hold wreckage from a bad paste,
+    # which would otherwise break every request rather than just setup.
+    return sanitize_cookies(cookies)
+
+
+def _cookie_is_expired(morsel: Morsel) -> bool:
+    """Return whether a Set-Cookie is really a delete.
+
+    A server signals a logout either with max-age=0 or with an expires date
+    in the past. Reading only max-age meant an expires-style logout was
+    absorbed and replayed as though it were a fresh cookie.
+    """
+    max_age = str(morsel.get("max-age", "")).strip()
+    if max_age:
+        try:
+            return int(max_age) <= 0
+        except ValueError:
+            return False
+
+    expires = str(morsel.get("expires", "")).strip()
+    if not expires:
+        return False
+    when = dt_util.parse_datetime(expires) or _parse_http_date(expires)
+    return when is not None and when <= dt_util.utcnow()
+
+
+def _parse_http_date(value: str) -> datetime | None:
+    """Return an RFC 1123 cookie date, the format servers actually send."""
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def csrf_token(cookies: dict[str, str]) -> str:
@@ -171,11 +213,27 @@ def csrf_token(cookies: dict[str, str]) -> str:
 def build_headers(
     cookies: dict[str, str], extra: dict[str, str] | None = None
 ) -> dict[str, str]:
-    """Return the headers a TextNow web session sends on every call."""
+    """Return the headers a TextNow web session sends on every call.
+
+    The cookies go in as a header rather than through aiohttp's cookies=
+    argument. aiohttp hands those to http.cookies.SimpleCookie, which raises
+    CookieError on a name it dislikes -- an exception that is neither a
+    ClientError nor a HomeAssistantError, so it escapes every handler here
+    and surfaces as "unexpected error" with a traceback.
+    """
     headers = {**BROWSER_HEADERS, "X-CSRF-Token": csrf_token(cookies)}
+    header = cookie_header(cookies)
+    if header:
+        headers["Cookie"] = header
     if extra:
         headers.update(extra)
     return headers
+
+
+def _is_bot_block(body: str) -> bool:
+    """Return whether a refusal came from PerimeterX rather than TextNow."""
+    lowered = body.lower()
+    return any(marker in lowered for marker in BOT_BLOCK_MARKERS)
 
 
 def _raise_for_auth_status(status: int, body: str) -> None:
@@ -185,8 +243,7 @@ def _raise_for_auth_status(status: int, body: str) -> None:
     protection stepping in; both need fresh cookies but the advice differs.
     """
     if status == 403:
-        lowered = body.lower()
-        if any(marker in lowered for marker in BOT_BLOCK_MARKERS):
+        if _is_bot_block(body):
             raise TextNowBlockedError(
                 "TextNow's bot protection blocked Home Assistant (HTTP 403). "
                 "Fresh cookies from a browser session are needed"
@@ -229,7 +286,6 @@ async def async_api_request(
     url: str,
     *,
     headers_factory: Callable[[], dict[str, str]],
-    cookies_factory: Callable[[], dict[str, str]] | None = None,
     cookie_sink: Callable[[SimpleCookie], None] | None = None,
     params: dict[str, str] | None = None,
     json_data: Any = None,
@@ -241,9 +297,10 @@ async def async_api_request(
 ) -> Any:
     """Call the TextNow API and retry the failures worth retrying.
 
-    Cookies and headers are rebuilt for every attempt, and the cookies
-    TextNow sends back are handed to the caller, so a rotated session is
-    followed instead of replaying the values the session started with.
+    Headers, including the Cookie header, are rebuilt for every attempt, and
+    the cookies TextNow sends back are handed to the caller, so a rotated
+    session is followed instead of replaying the values the session started
+    with.
     """
     last_error = "no attempt was made"
 
@@ -256,7 +313,6 @@ async def async_api_request(
                 json=json_data,
                 data=data,
                 headers=headers_factory(),
-                cookies=cookies_factory() if cookies_factory else None,
                 timeout=timeout,
             ) as response:
                 # Read the new cookies first: a rejected request still
@@ -267,8 +323,20 @@ async def async_api_request(
                 if check_auth and (
                     response.status in AUTH_STATUSES or response.status == 403
                 ):
-                    _raise_for_auth_status(response.status, await response.text())
-                if response.status not in RETRY_STATUSES:
+                    body = await response.text()
+                    # A 403 that is not the bot protection is usually the CSRF
+                    # token and the cookie disagreeing. The refreshed token
+                    # arrived with this very reply and has just been absorbed,
+                    # so one more attempt settles it rather than demanding a
+                    # whole new sign-in.
+                    if (
+                        response.status != 403
+                        or attempt >= attempts
+                        or _is_bot_block(body)
+                    ):
+                        _raise_for_auth_status(response.status, body)
+                    last_error = "HTTP 403 (CSRF token refreshed, retrying)"
+                elif response.status not in RETRY_STATUSES:
                     if response.status >= 400:
                         body = await response.text()
                         raise TextNowApiError(
@@ -277,7 +345,8 @@ async def async_api_request(
                     if not parse_json:
                         return await response.read()
                     return _parse_json_body(await response.text())
-                last_error = f"HTTP {response.status}"
+                else:
+                    last_error = f"HTTP {response.status}"
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
             last_error = f"{type(err).__name__}: {err}"
 
@@ -330,7 +399,6 @@ async def async_validate_session(
             "GET",
             f"{BASE_URL}/api/users/{username}/messages",
             headers_factory=lambda: build_headers(cookies),
-            cookies_factory=lambda: cookies,
             params={
                 "start_message_id": "0",
                 "direction": "future",
@@ -355,6 +423,7 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
         self._config: dict[str, Any] = dict(entry.data)
         self._cookies: dict[str, str] = cookies_from_entry_data(entry.data)
         self._last_cookie_write: datetime | None = None
+        self._cookies_unsaved = False
         self._failures = 0
         self._last_outbound: datetime | None = None
         self._last_outbound_read = False
@@ -424,7 +493,7 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
             await self._poll_unread_messages()
             await self._cleanup_expired_pending()
         except TextNowAuthError as err:
-            self._async_pause_polling()
+            self._async_slow_to_recovery_polling()
             self._async_report_auth_problem(err)
             raise ConfigEntryAuthFailed(str(err)) from err
         except TextNowError as err:
@@ -514,20 +583,47 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
     async def async_shutdown(self) -> None:
         """Release the session on shutdown."""
         await super().async_shutdown()
+        # Cookies held back by the write throttle would otherwise be lost, and
+        # the next start would replay a set older than the one this session was
+        # using by the time it stopped.
+        if self._cookies_unsaved and self.hass.config_entries.async_get_entry(
+            self.entry.entry_id
+        ):
+            self._async_persist_cookies(force=True)
         _async_release_session(self.session)
         self.session = None
 
     @callback
-    def _async_pause_polling(self) -> None:
-        """Stop polling a session TextNow has rejected.
+    def _async_slow_to_recovery_polling(self) -> None:
+        """Back right off, but keep checking, after TextNow rejects a session.
 
-        Retrying an expired session every 30 seconds is what turns one
-        authentication failure into thousands of requests a day.
+        Setting update_interval to None here used to deadlock the account:
+        auth_failed is only cleared by a poll, and with no interval there was
+        never another poll, so the flag stayed true until Home Assistant
+        restarted. Slowing down instead means a session that starts working
+        again is noticed, and a dismissed reauth prompt comes back.
         """
         self.auth_failed = True
-        if self.update_interval is not None:
-            self.update_interval = None
-            _LOGGER.debug("Paused TextNow polling until the session is renewed")
+        if self.update_interval != AUTH_RECOVERY_INTERVAL:
+            self.update_interval = AUTH_RECOVERY_INTERVAL
+            _LOGGER.debug(
+                "TextNow polling slowed to every %s minutes until the session "
+                "is renewed",
+                int(AUTH_RECOVERY_INTERVAL.total_seconds() // 60),
+            )
+
+    @callback
+    def async_rearm_polling(self) -> None:
+        """Return to the configured interval and retry straight away.
+
+        Called when something outside the poll loop may have fixed the
+        session, such as the panel's refresh button.
+        """
+        self.auth_failed = False
+        self._failures = 0
+        interval = timedelta(seconds=self.polling_interval)
+        if self.update_interval != interval:
+            self.update_interval = interval
 
     @callback
     def _async_back_off(self) -> None:
@@ -619,35 +715,58 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
 
         for name, morsel in cookies.items():
             value = morsel.value
-            deleted = not value or str(morsel.get("max-age", "")).strip() in {"0", "-1"}
-            if deleted:
+            if _cookie_is_expired(morsel) or not value:
                 if self._cookies.pop(name, None) is not None:
                     changed = True
-            elif self._cookies.get(name) != value:
+                continue
+            if not is_valid_cookie_name(name) or not is_valid_cookie_value(value):
+                _LOGGER.debug("Ignoring unusable cookie %r sent by TextNow", name)
+                continue
+            if self._cookies.get(name) != value:
                 self._cookies[name] = value
                 changed = True
+
+        # A rotated _csrf with no matching XSRF-TOKEN would leave the header
+        # and the cookie disagreeing, which TextNow reads as a forged request.
+        if changed and "_csrf" in cookies and "XSRF-TOKEN" not in cookies:
+            refreshed = csrf_token(self._cookies)
+            if refreshed and self._cookies.get("XSRF-TOKEN") not in (None, refreshed):
+                self._cookies.pop("XSRF-TOKEN", None)
+                _LOGGER.debug("Dropped the stale XSRF-TOKEN after _csrf rotated")
 
         if changed:
             self._async_persist_cookies()
 
     @callback
-    def _async_persist_cookies(self) -> None:
+    def _async_persist_cookies(self, force: bool = False) -> None:
         """Store rotated cookies so a restart stays signed in.
 
-        The session cookie is written straight away; the tokens that rotate on
-        every call are written occasionally to spare the disk.
+        Everything the session authenticates with -- the login cookie and both
+        CSRF cookies -- is written the moment it moves, because a saved set
+        whose token no longer matches its session reads server side as a forged
+        request. Only the noisy remainder, mostly bot protection cookies that
+        rotate on every single call, is throttled to spare the disk, and that
+        is flushed on shutdown so a restart inside the throttle window cannot
+        resurrect a stale set.
         """
-        login_cookie = self._cookies.get("connect.sid", "")
         now = dt_util.utcnow()
+        stored = self.entry.data
+        auth_cookies_moved = any(
+            self._cookies.get(name, "") != str(stored.get(key) or "")
+            for key, name in COOKIE_KEYS.items()
+        )
 
         if (
-            login_cookie == self.entry.data.get("connect_sid")
+            not force
+            and not auth_cookies_moved
             and self._last_cookie_write is not None
             and now - self._last_cookie_write < COOKIE_PERSIST_INTERVAL
         ):
+            self._cookies_unsaved = True
             return
 
         self._last_cookie_write = now
+        self._cookies_unsaved = False
         data = {
             **self.entry.data,
             CONF_COOKIES: dict(self._cookies),
@@ -689,7 +808,6 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
                 method,
                 url,
                 headers_factory=self._headers_factory(extra_headers),
-                cookies_factory=lambda: self._cookies,
                 cookie_sink=self._async_absorb_cookies,
                 params=params,
                 json_data=json_data,
@@ -701,7 +819,7 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
             # A service call has no coordinator refresh to report through, so
             # the reauth flow and the repair item are started here.
             if self.entry.state is ConfigEntryState.LOADED:
-                self._async_pause_polling()
+                self._async_slow_to_recovery_polling()
                 self._async_report_auth_problem(err)
                 self.entry.async_start_reauth(self.hass)
             raise
