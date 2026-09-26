@@ -1,7 +1,6 @@
 """Config flow for TextNow integration."""
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any
@@ -39,117 +38,11 @@ from .coordinator import (
     TextNowConnectionError,
     async_validate_session,
 )
+from .cookies import parse_cookie_string
 from .storage import TextNowStorage
 from .phone_utils import format_phone_number, readable_phone_number
 
 _LOGGER = logging.getLogger(__name__)
-
-# Cookie attributes that show up when a Set-Cookie header or a cookie
-# manager export is pasted instead of a plain cookie line.
-COOKIE_ATTRIBUTES = {
-    "domain",
-    "expires",
-    "httponly",
-    "max-age",
-    "partitioned",
-    "path",
-    "priority",
-    "samesite",
-    "secure",
-    "version",
-}
-
-_CURL_COOKIE_PATTERN = re.compile(
-    r"""(?:-H\s+['"]\s*cookie\s*:|-b\s+['"]|--cookie\s+['"])(?P<cookies>[^'"]+)['"]?""",
-    re.IGNORECASE,
-)
-
-
-def _parse_json_cookies(text: str) -> dict[str, str]:
-    """Return cookies from a cookie manager JSON export."""
-    if not text.startswith(("[", "{")):
-        return {}
-    try:
-        payload = json.loads(text)
-    except ValueError:
-        return {}
-
-    if isinstance(payload, dict):
-        if isinstance(payload.get("cookies"), list):
-            payload = payload["cookies"]
-        else:
-            return {
-                str(key): str(value)
-                for key, value in payload.items()
-                if isinstance(value, str)
-            }
-
-    cookies: dict[str, str] = {}
-    if isinstance(payload, list):
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            name = item.get("name") or item.get("key")
-            value = item.get("value")
-            if name and value is not None:
-                cookies[str(name)] = str(value)
-    return cookies
-
-
-def _parse_cookie_pairs(text: str) -> dict[str, str]:
-    """Return cookies from a cookie header, or a devtools cookie table."""
-    cookies: dict[str, str] = {}
-
-    for line in text.replace("\r", "").split("\n"):
-        line = re.sub(r"^\s*(?:set-)?cookie\s*:\s*", "", line, flags=re.IGNORECASE)
-        if not line.strip():
-            continue
-
-        # The devtools Application tab copies one tab separated cookie per line.
-        if "\t" in line and "=" not in line.split("\t")[0]:
-            fields = [field for field in line.split("\t") if field.strip()]
-            if len(fields) >= 2:
-                cookies[fields[0].strip()] = fields[1].strip()
-            continue
-
-        for part in line.split(";"):
-            part = part.strip()
-            if not part:
-                continue
-            key, _, value = part.partition("=")
-            key = key.strip()
-            value = value.strip()
-            if not key or not value or key.lower() in COOKIE_ATTRIBUTES:
-                continue
-            if value.startswith('"') and value.endswith('"'):
-                value = value[1:-1]
-            cookies[key] = value
-
-    return cookies
-
-
-def parse_cookie_string(cookie_string: str) -> dict[str, str]:
-    """Return the cookies found in whatever the user pasted.
-
-    Accepts a cookie header line, the output of document.cookie, a
-    "Copy as cURL" command, the devtools cookie table and the JSON
-    exports produced by cookie manager browser extensions.
-    """
-    if not cookie_string:
-        return {}
-
-    text = cookie_string.strip()
-
-    cookies = _parse_json_cookies(text)
-    if cookies:
-        return cookies
-
-    curl_match = _CURL_COOKIE_PATTERN.search(text)
-    if curl_match:
-        text = curl_match.group("cookies")
-
-    return _parse_cookie_pairs(text)
-
 
 def normalize_username(raw_username: str) -> str:
     """Return the bare TextNow username."""
