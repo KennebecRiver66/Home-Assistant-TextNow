@@ -13,6 +13,9 @@ const DOCS_FALLBACK =
 const INTEGRATION_PAGE = "/config/integrations/integration/textnow";
 const ADD_ACCOUNT_PAGE = "/config/integrations/dashboard/add?domain=textnow";
 
+/** Found next to this module, so the preview harness resolves it too. */
+const LOGO_URL = new URL("./textnow-logo.png", import.meta.url).href;
+
 /** How often the panel asks Home Assistant how the accounts are doing. */
 const POLL_MS = 15000;
 
@@ -528,7 +531,7 @@ class TextNowPanel extends HTMLElement {
         </button>
         <span class="logo">
           ${svg(ICON.message, 20)}
-          <img src="/textnow_panel/textnow-logo.png" alt="" />
+          <img src="${LOGO_URL}" alt="" onerror="this.remove()" />
         </span>
         <div class="titles">
           <h1>TextNow</h1>
