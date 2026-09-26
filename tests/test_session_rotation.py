@@ -16,6 +16,7 @@ from aiohttp import web
 from custom_components.textnow.coordinator import (
     TextNowAuthError,
     TextNowDataUpdateCoordinator,
+    _async_release_session,
     async_api_request,
     build_headers,
 )
@@ -101,6 +102,43 @@ async def _poll(client: _Client, session: aiohttp.ClientSession, base: str) -> A
         cookie_sink=client._async_absorb_cookies,
         attempts=1,
     )
+
+
+def test_releasing_a_session_detaches_it_instead_of_closing_it() -> None:
+    """Home Assistant logs a bug report request when close() is called.
+
+    Sessions from the aiohttp_client helper have close() swapped for a shim
+    that only warns, so closing one warns and leaks it at the same time.
+    """
+
+    async def scenario() -> None:
+        # The connector stands in for the one Home Assistant shares between
+        # every integration, so it has to survive the session being released.
+        connector = aiohttp.TCPConnector()
+        session = aiohttp.ClientSession(
+            connector=connector, cookie_jar=aiohttp.DummyCookieJar()
+        )
+        closed = False
+
+        async def _warn_instead_of_closing() -> None:
+            nonlocal closed
+            closed = True
+
+        session.close = _warn_instead_of_closing  # type: ignore[method-assign]
+
+        try:
+            _async_release_session(session)
+
+            assert closed is False
+            assert session.closed is True
+            assert connector.closed is False
+            # Unloading after a failed setup can release the same session twice
+            _async_release_session(session)
+            _async_release_session(None)
+        finally:
+            await connector.close()
+
+    asyncio.run(scenario())
 
 
 def test_a_rotating_session_survives_repeated_polls() -> None:

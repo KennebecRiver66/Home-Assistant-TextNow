@@ -291,6 +291,20 @@ async def async_api_request(
     )
 
 
+@callback
+def _async_release_session(session: aiohttp.ClientSession | None) -> None:
+    """Give up a session created with auto_cleanup disabled.
+
+    The connector belongs to Home Assistant and is shared with every other
+    integration, so the session is detached rather than closed. Home Assistant
+    also replaces close() on the sessions it hands out with a shim that only
+    logs "this integration closes the Home Assistant aiohttp session" and asks
+    the user to file a bug report, so calling it would warn and still leak.
+    """
+    if session is not None and not session.closed:
+        session.detach()
+
+
 async def async_validate_session(
     hass: HomeAssistant, username: str, cookies: dict[str, str]
 ) -> None:
@@ -319,7 +333,7 @@ async def async_validate_session(
             attempts=2,
         )
     finally:
-        await session.close()
+        _async_release_session(session)
 
 
 class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
@@ -377,10 +391,9 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
         return {}
 
     async def async_shutdown(self) -> None:
-        """Close the session on shutdown."""
+        """Release the session on shutdown."""
         await super().async_shutdown()
-        if self.session is not None and not self.session.closed:
-            await self.session.close()
+        _async_release_session(self.session)
         self.session = None
 
     @callback
