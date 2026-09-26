@@ -17,7 +17,12 @@ from homeassistant.helpers import (
 from homeassistant.loader import async_get_integration
 from homeassistant.util import slugify
 
-from .const import CONF_ENTITY_IDS_MIGRATED, DEVICE_NAME, DOMAIN
+from .const import (
+    CONF_ENTITY_IDS_MIGRATED,
+    COOKIE_HELP_URL,
+    DEVICE_NAME,
+    DOMAIN,
+)
 from .coordinator import TextNowDataUpdateCoordinator
 from .storage import TextNowStorage
 
@@ -152,6 +157,7 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         module_url=f"{PANEL_URL}/textnow-panel.js?v={version}",
         embed_iframe=False,
         require_admin=False,
+        config={"help_url": COOKIE_HELP_URL, "version": version},
     )
 
     _LOGGER.debug("TextNow panel registered")
