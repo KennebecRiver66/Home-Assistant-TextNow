@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect your TextNow account",
-        "description": "Home Assistant needs the cookies from a browser that is signed in to TextNow. The quickest way, with no header hunting:\n\n1. Sign in to [textnow.com]({textnow_url}) in a desktop browser (Chrome, Edge or Firefox).\n2. Press **F12** to open developer tools and pick the **Network** tab.\n3. Reload the page, then type `messages` in the filter box.\n4. Right-click the first row and choose **Copy → Copy as cURL**.\n5. Paste it in the **Cookies** box below and leave **Username** empty — both are read from the paste.\n\nA plain cookie line works too: in the same row, look under *Request headers* for **cookie** and copy the whole line. In that case fill in the username from **Settings → Account** on textnow.com.\n\n[Instructions with screenshots]({help_url})",
+        "description": "TextNow has no app password, so Home Assistant borrows the session from a browser you are already signed in to. On a computer this takes about two minutes; a phone cannot do step 2.\n\n1. Sign in to [textnow.com]({textnow_url}) in Chrome, Edge or Firefox.\n2. Press **F12**, then click the **Network** tab in the panel that opens.\n3. Reload the page and type `messages` into the filter box.\n4. Right-click the first row in the list and choose **Copy → Copy as cURL**.\n5. Paste it into **Cookies** below and leave **Username** empty — both are read from the paste.\n\nPrefer copying the cookie line? In the same row open *Request headers*, copy the whole **cookie** line, and fill in the username from **Settings → Account** on textnow.com.\n\n[Step-by-step guide with screenshots]({help_url})",
         "data": {
           "username": "Username (optional)",
           "cookie_string": "Cookies"
@@ -15,7 +15,7 @@
       },
       "reauth_confirm": {
         "title": "TextNow needs new cookies",
-        "description": "The saved browser session for **{username}** is no longer accepted. TextNow signs sessions out after a while, so this is expected rather than a fault. Your contacts, sensors and automations are kept.\n\nHome Assistant needs the cookies from a browser that is signed in to TextNow. The quickest way, with no header hunting:\n\n1. Sign in to [textnow.com]({textnow_url}) in a desktop browser (Chrome, Edge or Firefox).\n2. Press **F12** to open developer tools and pick the **Network** tab.\n3. Reload the page, then type `messages` in the filter box.\n4. Right-click the first row and choose **Copy → Copy as cURL**.\n5. Paste it in the **Cookies** box below and leave **Username** empty — both are read from the paste.\n\nA plain cookie line works too: in the same row, look under *Request headers* for **cookie** and copy the whole line. In that case fill in the username from **Settings → Account** on textnow.com.\n\n[Instructions with screenshots]({help_url})",
+        "description": "The saved browser session for **{username}** is no longer accepted. TextNow signs sessions out after a while, so this is expected rather than a fault. Your contacts, sensors and automations are kept.\n\nTextNow has no app password, so Home Assistant borrows the session from a browser you are already signed in to. On a computer this takes about two minutes; a phone cannot do step 2.\n\n1. Sign in to [textnow.com]({textnow_url}) in Chrome, Edge or Firefox.\n2. Press **F12**, then click the **Network** tab in the panel that opens.\n3. Reload the page and type `messages` into the filter box.\n4. Right-click the first row in the list and choose **Copy → Copy as cURL**.\n5. Paste it into **Cookies** below and leave **Username** empty — both are read from the paste.\n\nPrefer copying the cookie line? In the same row open *Request headers*, copy the whole **cookie** line, and fill in the username from **Settings → Account** on textnow.com.\n\n[Step-by-step guide with screenshots]({help_url})",
         "data": {
           "username": "Username (optional)",
           "cookie_string": "Cookies"
@@ -46,15 +46,16 @@
   "options": {
     "step": {
       "init": {
-        "title": "TextNow",
-        "description": "What would you like to do?",
-        "data": {
-          "option": "Action"
+        "title": "TextNow options",
+        "description": "What would you like to change?",
+        "menu_options": {
+          "account": "Connection and message checking",
+          "contacts": "Contacts"
         }
       },
       "account": {
         "title": "Account settings",
-        "description": "Paste a fresh cookie line whenever TextNow signs the session out, and choose how often Home Assistant checks for new messages.\n\nHome Assistant needs the cookies from a browser that is signed in to TextNow. The quickest way, with no header hunting:\n\n1. Sign in to [textnow.com]({textnow_url}) in a desktop browser (Chrome, Edge or Firefox).\n2. Press **F12** to open developer tools and pick the **Network** tab.\n3. Reload the page, then type `messages` in the filter box.\n4. Right-click the first row and choose **Copy → Copy as cURL**.\n5. Paste it in the **Cookies** box below and leave **Username** empty — both are read from the paste.\n\nA plain cookie line works too: in the same row, look under *Request headers* for **cookie** and copy the whole line. In that case fill in the username from **Settings → Account** on textnow.com.\n\n[Instructions with screenshots]({help_url})",
+        "description": "Paste a fresh cookie line whenever TextNow signs the session out, and choose how often Home Assistant checks for new messages.\n\nTextNow has no app password, so Home Assistant borrows the session from a browser you are already signed in to. On a computer this takes about two minutes; a phone cannot do step 2.\n\n1. Sign in to [textnow.com]({textnow_url}) in Chrome, Edge or Firefox.\n2. Press **F12**, then click the **Network** tab in the panel that opens.\n3. Reload the page and type `messages` into the filter box.\n4. Right-click the first row in the list and choose **Copy → Copy as cURL**.\n5. Paste it into **Cookies** below and leave **Username** empty — both are read from the paste.\n\nPrefer copying the cookie line? In the same row open *Request headers*, copy the whole **cookie** line, and fill in the username from **Settings → Account** on textnow.com.\n\n[Step-by-step guide with screenshots]({help_url})",
         "data": {
           "username": "Username (optional)",
           "cookie_string": "Cookies",
@@ -67,40 +68,50 @@
         }
       },
       "contacts": {
-        "title": "Manage contacts",
-        "description": "Current contacts:\n{contacts}\n\nSelect an action:",
-        "data": {
-          "action": "Action"
+        "title": "Contacts",
+        "description": "Each contact gets its own sensor holding their last message.\n\n{contacts}",
+        "menu_options": {
+          "add_contact": "Add a contact",
+          "pick_edit": "Edit a contact",
+          "pick_delete": "Remove a contact",
+          "init": "Back"
         }
       },
       "select_contact": {
-        "title": "Select contact",
-        "description": "Select a contact to {action}",
+        "title": "Which contact?",
+        "description": "Choose the contact you want to {action}.",
         "data": {
           "contact_id": "Contact"
         }
       },
       "confirm_delete": {
-        "title": "Confirm delete",
-        "description": "Are you sure you want to delete {name}?",
+        "title": "Remove {name}?",
+        "description": "Their sensor is removed from Home Assistant, and any automation using it stops working until you point it somewhere else. Messages already in TextNow are not deleted.",
         "data": {
-          "confirm": "Yes, delete this contact"
+          "confirm": "Yes, remove this contact"
         }
       },
       "add_contact": {
-        "title": "Add contact",
-        "description": "Add a new contact",
+        "title": "Add a contact",
+        "description": "This creates a sensor named after the contact, which holds the last message they sent.",
         "data": {
-          "name": "Contact name",
+          "name": "Name",
           "phone": "Phone number"
+        },
+        "data_description": {
+          "name": "Used for the sensor name and in automations, for example Sam.",
+          "phone": "10 digits, US numbers only. Spaces and dashes are fine."
         }
       },
       "edit_contact": {
-        "title": "Edit contact",
-        "description": "Edit contact details",
+        "title": "Edit {name}",
+        "description": "Renaming a contact does not rename their existing sensor.",
         "data": {
-          "name": "Contact name",
+          "name": "Name",
           "phone": "Phone number"
+        },
+        "data_description": {
+          "phone": "10 digits, US numbers only."
         }
       }
     },

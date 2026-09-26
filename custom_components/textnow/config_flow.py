@@ -181,6 +181,18 @@ def form_placeholders(**extra: str) -> dict[str, str]:
     return {"help_url": COOKIE_HELP_URL, "textnow_url": BASE_URL, **extra}
 
 
+def contact_schema() -> vol.Schema:
+    """Return the schema used to add or edit a contact."""
+    return vol.Schema(
+        {
+            vol.Required("name"): selector.TextSelector(),
+            vol.Required("phone"): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.TEL)
+            ),
+        }
+    )
+
+
 def credentials_schema(*, include_polling_interval: bool = False) -> vol.Schema:
     """Return the schema used to ask for account credentials."""
     fields: dict[Any, Any] = {
@@ -360,28 +372,13 @@ class TextNowOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Manage the options - main menu."""
-        if user_input is None:
-            return self.async_show_form(
-                step_id="init",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required("option"): vol.In(
-                            {
-                                "account": "Account Settings",
-                                "contacts": "Manage Contacts",
-                            }
-                        ),
-                    }
-                ),
-            )
+        """Show the options menu.
 
-        option = user_input.get("option")
-        if option == "account":
-            return await self.async_step_account()
-        if option == "contacts":
-            return await self.async_step_contacts()
-        return await self.async_step_init()
+        A menu is one click per choice, where a dropdown plus Submit was two.
+        """
+        return self.async_show_menu(
+            step_id="init", menu_options=["account", "contacts"]
+        )
 
     async def async_step_account(
         self, user_input: dict[str, Any] | None = None
@@ -447,84 +444,61 @@ class TextNowOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_contacts(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Manage contacts - menu."""
-        if user_input is None:
-            storage = TextNowStorage(self.hass, self.config_entry.entry_id)
-            contacts = await storage.async_get_contacts()
+        """Manage contacts."""
+        storage = TextNowStorage(self.hass, self.config_entry.entry_id)
+        contacts = await storage.async_get_contacts()
 
-            contact_list: list[str] = []
-            if contacts:
-                for contact_id, contact_data in contacts.items():
-                    name = contact_data.get("name", "Unknown")
-                    phone = contact_data.get("phone", "N/A")
-                    contact_list.append(f"• {name} ({phone})")
-                contacts_text = "\n".join(contact_list)
-            else:
-                contacts_text = "No contacts added yet."
-
-            return self.async_show_form(
-                step_id="contacts",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required("action"): vol.In(
-                            {
-                                "add": "Add New Contact",
-                                "edit": "Edit Existing Contact",
-                                "delete": "Delete Contact",
-                                "back": "← Back to Main Menu",
-                            }
-                        ),
-                    }
-                ),
-                description_placeholders={"contacts": contacts_text},
+        if contacts:
+            contacts_text = "\n".join(
+                f"- {data.get('name', 'Unknown')} ({data.get('phone', '')})"
+                for data in contacts.values()
             )
+        else:
+            contacts_text = "No contacts yet."
 
-        action = user_input.get("action")
-        if action == "add":
-            return await self.async_step_add_contact()
-        if action == "edit":
-            self.action_type = "edit"
-            return await self.async_step_select_contact()
-        if action == "delete":
-            self.action_type = "delete"
-            return await self.async_step_select_contact()
-        if action == "back":
-            return await self.async_step_init()
-        return await self.async_step_contacts()
+        menu_options = ["add_contact"]
+        if contacts:
+            menu_options += ["pick_edit", "pick_delete"]
+        menu_options.append("init")
+
+        return self.async_show_menu(
+            step_id="contacts",
+            menu_options=menu_options,
+            description_placeholders={"contacts": contacts_text},
+        )
+
+    async def async_step_pick_edit(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose a contact to edit."""
+        self.action_type = "edit"
+        return await self.async_step_select_contact()
+
+    async def async_step_pick_delete(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose a contact to remove."""
+        self.action_type = "delete"
+        return await self.async_step_select_contact()
 
     async def async_step_add_contact(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Add a new contact."""
         errors: dict[str, str] = {}
+        formatted_phone = ""
 
-        if user_input is None:
+        if user_input is not None:
+            try:
+                formatted_phone = format_phone_number(user_input["phone"])
+            except ValueError:
+                errors["phone"] = "invalid_phone"
+
+        if user_input is None or errors:
             return self.async_show_form(
                 step_id="add_contact",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required("name"): str,
-                        vol.Required("phone"): str,
-                    }
-                ),
-            )
-
-        # Format and validate phone number
-        try:
-            formatted_phone = format_phone_number(user_input["phone"])
-        except ValueError:
-            errors["base"] = "invalid_phone"
-            return self.async_show_form(
-                step_id="add_contact",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required(
-                            "name", default=user_input.get("name", "")
-                        ): str,
-                        vol.Required(
-                            "phone", default=user_input.get("phone", "")
-                        ): str,
-                    }
+                data_schema=self.add_suggested_values_to_schema(
+                    contact_schema(), user_input or {}
                 ),
                 errors=errors,
             )
@@ -571,22 +545,26 @@ class TextNowOptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_abort(reason="no_contacts")
 
         if user_input is None:
-            contact_options: dict[str, str] = {}
-            for contact_id, contact_data in contacts.items():
-                name = contact_data.get("name", "Unknown")
-                phone = contact_data.get("phone", "N/A")
-                contact_options[contact_id] = f"{name} ({phone})"
-
+            options = [
+                selector.SelectOptionDict(
+                    value=contact_id,
+                    label=f"{data.get('name', 'Unknown')} ({data.get('phone', '')})",
+                )
+                for contact_id, data in contacts.items()
+            ]
             return self.async_show_form(
                 step_id="select_contact",
                 data_schema=vol.Schema(
                     {
-                        vol.Required("contact_id"): vol.In(contact_options),
+                        vol.Required("contact_id"): selector.SelectSelector(
+                            selector.SelectSelectorConfig(
+                                options=options,
+                                mode=selector.SelectSelectorMode.LIST,
+                            )
+                        ),
                     }
                 ),
-                description_placeholders={
-                    "action": self.action_type.capitalize()
-                },
+                description_placeholders={"action": self.action_type},
             )
 
         contact_id = user_input.get("contact_id")
@@ -653,37 +631,26 @@ class TextNowOptionsFlowHandler(config_entries.OptionsFlow):
 
         contact = contacts[self.contact_id]
         errors: dict[str, str] = {}
+        formatted_phone = ""
 
-        if user_input is None:
-            display_phone = contact.get("phone", "").replace("+1", "")
+        if user_input is not None:
+            try:
+                formatted_phone = format_phone_number(user_input["phone"])
+            except ValueError:
+                errors["phone"] = "invalid_phone"
+
+        if user_input is None or errors:
+            suggested = user_input or {
+                "name": contact.get("name", ""),
+                "phone": contact.get("phone", "").replace("+1", ""),
+            }
             return self.async_show_form(
                 step_id="edit_contact",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required(
-                            "name", default=contact.get("name", "")
-                        ): str,
-                        vol.Required("phone", default=display_phone): str,
-                    }
-                ),
-            )
-
-        try:
-            formatted_phone = format_phone_number(user_input["phone"])
-        except ValueError:
-            errors["base"] = "invalid_phone"
-            display_phone = user_input.get("phone", "").replace("+1", "")
-            return self.async_show_form(
-                step_id="edit_contact",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required(
-                            "name", default=user_input.get("name", "")
-                        ): str,
-                        vol.Required("phone", default=display_phone): str,
-                    }
+                data_schema=self.add_suggested_values_to_schema(
+                    contact_schema(), suggested
                 ),
                 errors=errors,
+                description_placeholders={"name": contact.get("name", "")},
             )
 
         await storage.async_save_contact(
