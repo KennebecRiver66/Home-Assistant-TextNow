@@ -1,14 +1,19 @@
 {
   "domain": "textnow",
   "name": "TextNow",
-  "codeowners": ["@zodyking"],
+  "codeowners": [
+    "@zodyking"
+  ],
   "config_flow": true,
-  "dependencies": ["http", "frontend", "panel_custom"],
-  "documentation": "https://github.com/zodyking/Home-Assistant-TextNow",
+  "dependencies": [
+    "http",
+    "frontend",
+    "panel_custom"
+  ],
+  "documentation": "https://github.com/KennebecRiver66/Home-Assistant-TextNow",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/zodyking/Home-Assistant-TextNow/issues",
+  "issue_tracker": "https://github.com/KennebecRiver66/Home-Assistant-TextNow/issues",
   "requirements": [],
-  "version": "1.1.3"
+  "version": "1.2.0"
 }
-
