@@ -423,6 +423,7 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
         self._config: dict[str, Any] = dict(entry.data)
         self._cookies: dict[str, str] = cookies_from_entry_data(entry.data)
         self._last_cookie_write: datetime | None = None
+        self._cookies_unsaved = False
         self._failures = 0
         self._last_outbound: datetime | None = None
         self._last_outbound_read = False
@@ -582,6 +583,13 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
     async def async_shutdown(self) -> None:
         """Release the session on shutdown."""
         await super().async_shutdown()
+        # Cookies held back by the write throttle would otherwise be lost, and
+        # the next start would replay a set older than the one this session was
+        # using by the time it stopped.
+        if self._cookies_unsaved and self.hass.config_entries.async_get_entry(
+            self.entry.entry_id
+        ):
+            self._async_persist_cookies(force=True)
         _async_release_session(self.session)
         self.session = None
 
@@ -730,23 +738,35 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
             self._async_persist_cookies()
 
     @callback
-    def _async_persist_cookies(self) -> None:
+    def _async_persist_cookies(self, force: bool = False) -> None:
         """Store rotated cookies so a restart stays signed in.
 
-        The session cookie is written straight away; the tokens that rotate on
-        every call are written occasionally to spare the disk.
+        Everything the session authenticates with -- the login cookie and both
+        CSRF cookies -- is written the moment it moves, because a saved set
+        whose token no longer matches its session reads server side as a forged
+        request. Only the noisy remainder, mostly bot protection cookies that
+        rotate on every single call, is throttled to spare the disk, and that
+        is flushed on shutdown so a restart inside the throttle window cannot
+        resurrect a stale set.
         """
-        login_cookie = self._cookies.get("connect.sid", "")
         now = dt_util.utcnow()
+        stored = self.entry.data
+        auth_cookies_moved = any(
+            self._cookies.get(name, "") != str(stored.get(key) or "")
+            for key, name in COOKIE_KEYS.items()
+        )
 
         if (
-            login_cookie == self.entry.data.get("connect_sid")
+            not force
+            and not auth_cookies_moved
             and self._last_cookie_write is not None
             and now - self._last_cookie_write < COOKIE_PERSIST_INTERVAL
         ):
+            self._cookies_unsaved = True
             return
 
         self._last_cookie_write = now
+        self._cookies_unsaved = False
         data = {
             **self.entry.data,
             CONF_COOKIES: dict(self._cookies),
