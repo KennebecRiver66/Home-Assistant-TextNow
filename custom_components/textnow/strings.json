@@ -2,81 +2,214 @@
   "config": {
     "step": {
       "user": {
-        "title": "TextNow Configuration",
-        "description": "Enter your TextNow account credentials to connect",
+        "title": "Connect your TextNow account",
+        "description": "TextNow has no app password, so Home Assistant borrows the session from a browser you are already signed in to. On a computer this takes about two minutes; a phone cannot do step 2.\n\n1. Sign in to [textnow.com]({textnow_url}) in Chrome, Edge or Firefox.\n2. Press **F12**, then click the **Network** tab in the panel that opens.\n3. Reload the page and type `messages` into the filter box.\n4. Right-click the first row in the list and choose **Copy → Copy as cURL**.\n5. Paste it into **Cookies** below and leave **Username** empty — both are read from the paste.\n\nPrefer copying the cookie line? In the same row open *Request headers*, copy the whole **cookie** line, and fill in the username from **Settings → Account** on textnow.com.\n\n[Step-by-step guide with screenshots]({help_url})",
         "data": {
-          "username": "Username",
-          "cookie_string": "Full Cookie String"
+          "username": "Username (optional)",
+          "cookie_string": "Cookies"
+        },
+        "data_description": {
+          "username": "Leave empty to read it from the paste. Otherwise use the username from Settings → Account on textnow.com, without the @.",
+          "cookie_string": "Paste a *Copy as cURL* command or the whole cookie line. Everything in the paste is kept, including the bot-protection cookies that make Home Assistant look like your browser."
         }
       },
-      "account": {
-        "title": "Account Settings",
-        "description": "Update your TextNow account settings"
-      },
-      "contacts": {
-        "title": "Manage Contacts",
-        "description": "Current contacts:\n{contacts}\n\nSelect an action:"
-      },
-      "select_contact": {
-        "title": "Select Contact",
-        "description": "Select a contact to {action}"
-      },
-      "confirm_delete": {
-        "title": "Confirm Delete",
-        "description": "Are you sure you want to delete {name}?"
-      },
-      "add_contact": {
-        "title": "Add Contact",
-        "description": "Add a new contact",
+      "reauth_confirm": {
+        "title": "TextNow needs new cookies",
+        "description": "The saved browser session for **{username}** is no longer accepted. TextNow signs sessions out after a while, so this is expected rather than a fault. Your contacts, sensors and automations are kept.\n\nTextNow has no app password, so Home Assistant borrows the session from a browser you are already signed in to. On a computer this takes about two minutes; a phone cannot do step 2.\n\n1. Sign in to [textnow.com]({textnow_url}) in Chrome, Edge or Firefox.\n2. Press **F12**, then click the **Network** tab in the panel that opens.\n3. Reload the page and type `messages` into the filter box.\n4. Right-click the first row in the list and choose **Copy → Copy as cURL**.\n5. Paste it into **Cookies** below and leave **Username** empty — both are read from the paste.\n\nPrefer copying the cookie line? In the same row open *Request headers*, copy the whole **cookie** line, and fill in the username from **Settings → Account** on textnow.com.\n\n[Step-by-step guide with screenshots]({help_url})",
         "data": {
-          "name": "Contact Name",
-          "phone": "Phone Number"
-        }
-      },
-      "edit_contact": {
-        "title": "Edit Contact",
-        "description": "Edit contact details",
-        "data": {
-          "name": "Contact Name",
-          "phone": "Phone Number"
+          "username": "Username (optional)",
+          "cookie_string": "Cookies"
+        },
+        "data_description": {
+          "username": "Leave empty to read it from the paste. Otherwise use the username from Settings → Account on textnow.com, without the @.",
+          "cookie_string": "Paste a *Copy as cURL* command or the whole cookie line. Everything in the paste is kept, including the bot-protection cookies that make Home Assistant look like your browser."
         }
       }
     },
     "error": {
-      "username_required": "Username is required",
-      "cookie_string_required": "Cookie string is required",
-      "connect_sid_missing": "connect.sid cookie not found in cookie string",
-      "csrf_missing": "_csrf cookie not found in cookie string",
-      "xsrf_token_missing": "XSRF-TOKEN cookie not found in cookie string",
-      "invalid_phone": "Phone number must be exactly 10 digits",
-      "invalid_credentials": "Invalid credentials",
-      "cannot_connect": "Cannot connect to TextNow",
-      "unknown": "Unknown error occurred"
+      "username_required": "Enter the TextNow username from Settings → Account, or paste a *Copy as cURL* command so it can be read from the request.",
+      "no_cookies": "No cookies were found in that text. Paste the whole cookie line from your browser.",
+      "connect_sid_missing": "The paste has no connect.sid cookie, which is the one that carries the sign-in session. Copy the cookie line again while signed in to TextNow.",
+      "csrf_missing": "The paste has neither the _csrf nor the XSRF-TOKEN cookie. Copy the whole cookie line, not just part of it.",
+      "invalid_auth": "TextNow rejected these credentials. The cookies may already have expired, or the username may not match the account they belong to.",
+      "cannot_connect": "Could not reach TextNow. Check the internet connection and try again.",
+      "unexpected_response": "TextNow replied with something unexpected. See the Home Assistant log for the details.",
+      "invalid_phone": "Enter a 10-digit phone number, for example (555) 123-4567.",
+      "unknown": "Unexpected error. See the Home Assistant log for the details."
     },
     "abort": {
-      "already_configured": "TextNow is already configured"
+      "already_configured": "This TextNow account is already set up",
+      "reauth_successful": "TextNow is connected again",
+      "reauth_failed": "The account to re-authenticate could no longer be found"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "TextNow options",
+        "description": "What would you like to change?",
+        "menu_options": {
+          "account": "Connection and message checking",
+          "contacts": "Contacts",
+          "keepalive": "Keep the number in use"
+        }
+      },
+      "account": {
+        "title": "Account settings",
+        "description": "Paste a fresh cookie line whenever TextNow signs the session out, and choose how often Home Assistant checks for new messages.\n\nTextNow has no app password, so Home Assistant borrows the session from a browser you are already signed in to. On a computer this takes about two minutes; a phone cannot do step 2.\n\n1. Sign in to [textnow.com]({textnow_url}) in Chrome, Edge or Firefox.\n2. Press **F12**, then click the **Network** tab in the panel that opens.\n3. Reload the page and type `messages` into the filter box.\n4. Right-click the first row in the list and choose **Copy → Copy as cURL**.\n5. Paste it into **Cookies** below and leave **Username** empty — both are read from the paste.\n\nPrefer copying the cookie line? In the same row open *Request headers*, copy the whole **cookie** line, and fill in the username from **Settings → Account** on textnow.com.\n\n[Step-by-step guide with screenshots]({help_url})",
+        "data": {
+          "username": "Username (optional)",
+          "cookie_string": "Cookies",
+          "polling_interval": "Check for new messages every"
+        },
+        "data_description": {
+          "polling_interval": "Shorter intervals deliver messages sooner but make more requests to TextNow.",
+          "username": "Leave empty to read it from the paste. Otherwise use the username from Settings → Account on textnow.com, without the @.",
+          "cookie_string": "Paste a *Copy as cURL* command or the whole cookie line. Everything in the paste is kept, including the bot-protection cookies that make Home Assistant look like your browser."
+        }
+      },
+      "contacts": {
+        "title": "Contacts",
+        "description": "Each contact gets its own sensor holding their last message.\n\n{contacts}",
+        "menu_options": {
+          "add_contact": "Add a contact",
+          "pick_edit": "Edit a contact",
+          "pick_delete": "Remove a contact",
+          "init": "Back"
+        }
+      },
+      "keepalive": {
+        "title": "Keep the number in use",
+        "description": "TextNow takes a number back if it sits unused, which would break every automation pointing at it. Home Assistant can send one short text to a number you choose whenever nothing else has gone out for a while.\n\nAnything you or your automations send counts, so in a busy house this may never need to send anything at all.\n\nLeave the number empty to turn this off.",
+        "data": {
+          "keepalive_phone": "Send it to",
+          "keepalive_days": "Only when nothing was sent for",
+          "keepalive_message": "Message to send"
+        },
+        "data_description": {
+          "keepalive_phone": "Pick one of your contacts or type any 10-digit number. Your own phone is the usual choice. Leave empty to turn this off.",
+          "keepalive_days": "Counted from the last message this account sent, for any reason. TextNow does not publish how long a number may sit idle, so the default leaves room under a week.",
+          "keepalive_message": "Keep it short and say where it came from, so nobody mistakes it for spam."
+        }
+      },
+      "select_contact": {
+        "title": "Which contact?",
+        "description": "Choose the contact you want to {action}.",
+        "data": {
+          "contact_id": "Contact"
+        }
+      },
+      "confirm_delete": {
+        "title": "Remove {name}?",
+        "description": "Their sensor is removed from Home Assistant, and any automation using it stops working until you point it somewhere else. Messages already in TextNow are not deleted.",
+        "data": {
+          "confirm": "Yes, remove this contact"
+        }
+      },
+      "add_contact": {
+        "title": "Add a contact",
+        "description": "This creates a sensor named after the contact, which holds the last message they sent.",
+        "data": {
+          "name": "Name",
+          "phone": "Phone number"
+        },
+        "data_description": {
+          "name": "Used for the sensor name and in automations, for example Sam.",
+          "phone": "10 digits, US numbers only. Spaces and dashes are fine."
+        }
+      },
+      "edit_contact": {
+        "title": "Edit {name}",
+        "description": "Renaming a contact does not rename their existing sensor.",
+        "data": {
+          "name": "Name",
+          "phone": "Phone number"
+        },
+        "data_description": {
+          "phone": "10 digits, US numbers only."
+        }
+      }
+    },
+    "error": {
+      "username_required": "Enter the TextNow username from Settings → Account, or paste a *Copy as cURL* command so it can be read from the request.",
+      "no_cookies": "No cookies were found in that text. Paste the whole cookie line from your browser.",
+      "connect_sid_missing": "The paste has no connect.sid cookie, which is the one that carries the sign-in session. Copy the cookie line again while signed in to TextNow.",
+      "csrf_missing": "The paste has neither the _csrf nor the XSRF-TOKEN cookie. Copy the whole cookie line, not just part of it.",
+      "invalid_auth": "TextNow rejected these credentials. The cookies may already have expired, or the username may not match the account they belong to.",
+      "cannot_connect": "Could not reach TextNow. Check the internet connection and try again.",
+      "unexpected_response": "TextNow replied with something unexpected. See the Home Assistant log for the details.",
+      "invalid_phone": "Enter a 10-digit phone number, for example (555) 123-4567.",
+      "unknown": "Unexpected error. See the Home Assistant log for the details."
+    },
+    "abort": {
+      "no_contacts": "There are no contacts yet",
+      "contact_not_found": "That contact no longer exists"
+    }
+  },
+  "issues": {
+    "bot_blocked": {
+      "title": "TextNow blocked Home Assistant",
+      "description": "TextNow's bot protection turned away the requests for {account}, so messages cannot be sent or received. Home Assistant has stopped checking for new messages.\n\nSign in to TextNow in a normal browser and answer anything it asks, then copy a fresh cookie line and paste it under **Settings → Devices & services → TextNow → Reconfigure**. Copy the whole line: the bot-protection part of it is what makes the requests look like the browser they came from. Checking for messages less often, in the integration options, makes this happen less."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "connected": "Connected",
+          "disconnected": "Disconnected",
+          "reauth_required": "New cookies needed"
+        }
+      }
+    }
+  },
+  "triggers": {
+    "message_received": {
+      "name": "Message received",
+      "description": "Triggers when a TextNow message arrives.",
+      "fields": {
+        "contact_id": {
+          "name": "Contact",
+          "description": "Only trigger for this contact. Leave empty for any contact."
+        },
+        "phone": {
+          "name": "Phone number",
+          "description": "Only trigger for this phone number. Leave empty for any number."
+        }
+      }
+    },
+    "phrase_received": {
+      "name": "Phrase received",
+      "description": "Triggers when an incoming TextNow message matches a phrase.",
+      "fields": {
+        "phrase": {
+          "name": "Phrase",
+          "description": "The phrase to look for in the message."
+        },
+        "match_type": {
+          "name": "Match type",
+          "description": "How the phrase is compared with the message."
+        },
+        "contact_id": {
+          "name": "Contact",
+          "description": "Only trigger for this contact. Leave empty for any contact."
+        },
+        "phone": {
+          "name": "Phone number",
+          "description": "Only trigger for this phone number. Leave empty for any number."
+        }
+      }
     }
   },
   "services": {
     "send": {
-      "name": "Send Message",
-      "description": "Send an SMS message"
+      "name": "Send message",
+      "description": "Send an SMS, MMS or voice message"
     },
     "send_menu": {
-      "name": "Send Menu",
+      "name": "Send menu",
       "description": "Send an interactive menu and wait for the user's response"
-    },
-    "prompt": {
-      "name": "Prompt",
-      "description": "Send a prompt and wait for reply"
-    },
-    "clear_pending": {
-      "name": "Clear Pending",
-      "description": "Clear pending expectations"
-    },
-    "set_context": {
-      "name": "Set Context",
-      "description": "Set context data for a contact"
     }
   },
   "device_automation": {
@@ -89,4 +222,3 @@
     }
   }
 }
-

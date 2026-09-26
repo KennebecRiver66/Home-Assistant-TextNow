@@ -33,10 +33,14 @@ MATCH_TYPE_EXACT = "exact"
 MATCH_TYPE_STARTS_WITH = "starts_with"
 MATCH_TYPE_REGEX = "regex"
 
+TRIGGER_TYPES = [TRIGGER_TYPE_MESSAGE_RECEIVED, TRIGGER_TYPE_PHRASE_RECEIVED]
+
 TRIGGER_SCHEMA = cv.TRIGGER_BASE_SCHEMA.extend(
     {
-        vol.Required(CONF_PLATFORM): DOMAIN,
-        vol.Required(CONF_TYPE): vol.In([TRIGGER_TYPE_MESSAGE_RECEIVED, TRIGGER_TYPE_PHRASE_RECEIVED]),
+        vol.Required(CONF_PLATFORM): vol.In(
+            [DOMAIN, *(f"{DOMAIN}.{name}" for name in TRIGGER_TYPES)]
+        ),
+        vol.Required(CONF_TYPE): vol.In(TRIGGER_TYPES),
         vol.Optional(CONF_CONTACT_ID): cv.string,
         vol.Optional(CONF_PHONE): cv.string,
         # For phrase_received trigger type
@@ -54,7 +58,15 @@ TRIGGER_SCHEMA = cv.TRIGGER_BASE_SCHEMA.extend(
 async def async_validate_trigger_config(
     hass: HomeAssistant, config: ConfigType
 ) -> ConfigType:
-    """Validate trigger config."""
+    """Validate trigger config.
+
+    Both the original "platform: textnow" plus "type:" form and the newer
+    "trigger: textnow.message_received" form are accepted; the newer one
+    carries the type in the platform name.
+    """
+    platform = config.get(CONF_PLATFORM, "")
+    if "." in platform and CONF_TYPE not in config:
+        config = {**config, CONF_TYPE: platform.partition(".")[2]}
     return TRIGGER_SCHEMA(config)
 
 

@@ -1,57 +1,320 @@
 """Config flow for TextNow integration."""
 from __future__ import annotations
 
+import json
 import logging
-from datetime import timedelta
+import re
 from typing import Any
+from urllib.parse import unquote
 
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.core import callback
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.config_entries import ConfigFlowResult
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import selector
 
-from .const import DOMAIN, DEFAULT_POLLING_INTERVAL
+from .const import (
+    DOMAIN,
+    CONF_COOKIES,
+    CONF_KEEPALIVE_DAYS,
+    CONF_KEEPALIVE_MESSAGE,
+    CONF_KEEPALIVE_PHONE,
+    CONF_POLLING_INTERVAL,
+    CONF_USERNAME,
+    COOKIE_HELP_URL,
+    DEFAULT_KEEPALIVE_DAYS,
+    DEFAULT_KEEPALIVE_MESSAGE,
+    DEFAULT_POLLING_INTERVAL,
+    MAX_KEEPALIVE_DAYS,
+    MAX_POLLING_INTERVAL,
+    MIN_KEEPALIVE_DAYS,
+    MIN_POLLING_INTERVAL,
+)
+from .coordinator import (
+    BASE_URL,
+    COOKIE_KEYS,
+    TextNowApiError,
+    TextNowAuthError,
+    TextNowConnectionError,
+    async_validate_session,
+)
 from .storage import TextNowStorage
-from .phone_utils import format_phone_number
+from .phone_utils import format_phone_number, readable_phone_number
 
 _LOGGER = logging.getLogger(__name__)
 
-STEP_USER_DATA_SCHEMA = vol.Schema(
-    {
-        vol.Required("username"): str,
-        vol.Required("cookie_string"): str,
-    }
+# Cookie attributes that show up when a Set-Cookie header or a cookie
+# manager export is pasted instead of a plain cookie line.
+COOKIE_ATTRIBUTES = {
+    "domain",
+    "expires",
+    "httponly",
+    "max-age",
+    "partitioned",
+    "path",
+    "priority",
+    "samesite",
+    "secure",
+    "version",
+}
+
+_CURL_COOKIE_PATTERN = re.compile(
+    r"""(?:-H\s+['"]\s*cookie\s*:|-b\s+['"]|--cookie\s+['"])(?P<cookies>[^'"]+)['"]?""",
+    re.IGNORECASE,
 )
 
 
-def parse_cookie_string(cookie_string: str) -> dict[str, str]:
-    """Parse cookie string and return dict of cookies.
-    
-    Matches the logic from server.py:
-    - Split by semicolons (or newlines converted to semicolons)
-    - Find first = sign for key=value pairs
-    - Remove quotes from values if present
-    """
-    cookies = {}
-    if not cookie_string:
-        return cookies
-    
-    parts = cookie_string.replace('\n', ';').split(';')
-    
-    for part in parts:
-        part = part.strip()
-        if not part:
+def _parse_json_cookies(text: str) -> dict[str, str]:
+    """Return cookies from a cookie manager JSON export."""
+    if not text.startswith(("[", "{")):
+        return {}
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return {}
+
+    if isinstance(payload, dict):
+        if isinstance(payload.get("cookies"), list):
+            payload = payload["cookies"]
+        else:
+            return {
+                str(key): str(value)
+                for key, value in payload.items()
+                if isinstance(value, str)
+            }
+
+    cookies: dict[str, str] = {}
+    if isinstance(payload, list):
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name") or item.get("key")
+            value = item.get("value")
+            if name and value is not None:
+                cookies[str(name)] = str(value)
+    return cookies
+
+
+def _parse_cookie_pairs(text: str) -> dict[str, str]:
+    """Return cookies from a cookie header, or a devtools cookie table."""
+    cookies: dict[str, str] = {}
+
+    for line in text.replace("\r", "").split("\n"):
+        line = re.sub(r"^\s*(?:set-)?cookie\s*:\s*", "", line, flags=re.IGNORECASE)
+        if not line.strip():
             continue
-        eq_index = part.find('=')
-        if eq_index > 0:
-            key = part[:eq_index].strip()
-            value = part[eq_index + 1:].strip()
+
+        # The devtools Application tab copies one tab separated cookie per line.
+        if "\t" in line and "=" not in line.split("\t")[0]:
+            fields = [field for field in line.split("\t") if field.strip()]
+            if len(fields) >= 2:
+                cookies[fields[0].strip()] = fields[1].strip()
+            continue
+
+        for part in line.split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            key, _, value = part.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if not key or not value or key.lower() in COOKIE_ATTRIBUTES:
+                continue
             if value.startswith('"') and value.endswith('"'):
                 value = value[1:-1]
             cookies[key] = value
-    
+
     return cookies
+
+
+def parse_cookie_string(cookie_string: str) -> dict[str, str]:
+    """Return the cookies found in whatever the user pasted.
+
+    Accepts a cookie header line, the output of document.cookie, a
+    "Copy as cURL" command, the devtools cookie table and the JSON
+    exports produced by cookie manager browser extensions.
+    """
+    if not cookie_string:
+        return {}
+
+    text = cookie_string.strip()
+
+    cookies = _parse_json_cookies(text)
+    if cookies:
+        return cookies
+
+    curl_match = _CURL_COOKIE_PATTERN.search(text)
+    if curl_match:
+        text = curl_match.group("cookies")
+
+    return _parse_cookie_pairs(text)
+
+
+def normalize_username(raw_username: str) -> str:
+    """Return the bare TextNow username."""
+    username = (raw_username or "").strip().strip("@")
+    for suffix in ("@textnow.me", "@textnow.com"):
+        if username.lower().endswith(suffix):
+            username = username[: -len(suffix)]
+    return username.strip()
+
+
+# A request URL or a cURL command carries the account name, which saves the
+# user a trip to the TextNow settings page.
+_USERNAME_PATTERNS = (
+    re.compile(r"/api(?:/v\d+)?/users/([^/?\s'\"]+)/"),
+    re.compile(r"[\"']user_?name[\"']\s*:\s*[\"']([^\"']+)[\"']"),
+)
+
+
+def extract_username(text: str) -> str:
+    """Return the username found in a pasted request, if any."""
+    for pattern in _USERNAME_PATTERNS:
+        match = pattern.search(text or "")
+        if not match:
+            continue
+        candidate = normalize_username(unquote(match.group(1)))
+        if candidate and candidate.lower() not in {"me", "self", "undefined"}:
+            return candidate
+    return ""
+
+
+def form_placeholders(**extra: str) -> dict[str, str]:
+    """Return the links used by the cookie instructions.
+
+    Translation strings may not contain URLs, so they arrive as placeholders.
+    """
+    return {"help_url": COOKIE_HELP_URL, "textnow_url": BASE_URL, **extra}
+
+
+def contact_schema() -> vol.Schema:
+    """Return the schema used to add or edit a contact."""
+    return vol.Schema(
+        {
+            vol.Required("name"): selector.TextSelector(),
+            vol.Required("phone"): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.TEL)
+            ),
+        }
+    )
+
+
+def keepalive_schema(contacts: dict[str, dict[str, Any]]) -> vol.Schema:
+    """Return the schema for the keep-alive settings.
+
+    The number can be picked from the contacts or typed in, because the
+    person who should get these messages is not necessarily someone the
+    automations text.
+    """
+    options = [
+        selector.SelectOptionDict(
+            value=data.get("phone", ""),
+            label=(
+                f"{data.get('name', 'Unknown')} — "
+                f"{readable_phone_number(data.get('phone', ''))}"
+            ),
+        )
+        for data in contacts.values()
+        if data.get("phone")
+    ]
+
+    return vol.Schema(
+        {
+            vol.Optional(CONF_KEEPALIVE_PHONE): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=options,
+                    custom_value=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(CONF_KEEPALIVE_DAYS): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=MIN_KEEPALIVE_DAYS,
+                    max=MAX_KEEPALIVE_DAYS,
+                    step=1,
+                    unit_of_measurement="days",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(CONF_KEEPALIVE_MESSAGE): selector.TextSelector(
+                selector.TextSelectorConfig(multiline=True)
+            ),
+        }
+    )
+
+
+def credentials_schema(*, include_polling_interval: bool = False) -> vol.Schema:
+    """Return the schema used to ask for account credentials."""
+    fields: dict[Any, Any] = {
+        # Optional: the username is read from the paste when left blank.
+        vol.Optional(CONF_USERNAME): selector.TextSelector(
+            selector.TextSelectorConfig(autocomplete="username")
+        ),
+        vol.Required("cookie_string"): selector.TextSelector(
+            selector.TextSelectorConfig(multiline=True)
+        ),
+    }
+
+    if include_polling_interval:
+        fields[vol.Optional("polling_interval")] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=MIN_POLLING_INTERVAL,
+                max=MAX_POLLING_INTERVAL,
+                step=5,
+                unit_of_measurement="seconds",
+                mode=selector.NumberSelectorMode.BOX,
+            )
+        )
+
+    return vol.Schema(fields)
+
+
+async def async_validate_account(
+    hass: HomeAssistant, username: str, cookie_string: str
+) -> tuple[str, dict[str, Any], dict[str, str]]:
+    """Check a username and cookie paste against TextNow.
+
+    Returns the username used, the values to store on the config entry, and
+    any error to show on the form.
+    """
+    cookies = parse_cookie_string(cookie_string)
+    if not cookies:
+        return username, {}, {"base": "no_cookies"}
+    if "connect.sid" not in cookies:
+        return username, {}, {"base": "connect_sid_missing"}
+    if "_csrf" not in cookies and "XSRF-TOKEN" not in cookies:
+        return username, {}, {"base": "csrf_missing"}
+
+    if not username:
+        username = extract_username(cookie_string)
+        if not username:
+            return username, {}, {"base": "username_required"}
+        _LOGGER.debug("Read the TextNow username from the pasted request")
+
+    credentials: dict[str, Any] = {
+        key: cookies.get(name, "") for key, name in COOKIE_KEYS.items()
+    }
+    # The rest of the paste is kept too: the bot protection cookies are part
+    # of what makes the requests look like the browser they came from.
+    credentials[CONF_COOKIES] = cookies
+
+    try:
+        await async_validate_session(hass, username, cookies)
+    except TextNowAuthError as err:
+        _LOGGER.debug("TextNow rejected the credentials: %s", err)
+        return username, credentials, {"base": "invalid_auth"}
+    except TextNowConnectionError as err:
+        _LOGGER.debug("Could not reach TextNow: %s", err)
+        return username, credentials, {"base": "cannot_connect"}
+    except TextNowApiError as err:
+        _LOGGER.error("Unexpected answer from TextNow: %s", err)
+        return username, credentials, {"base": "unexpected_response"}
+    except Exception:  # noqa: BLE001 - surfaced to the user as "unknown"
+        _LOGGER.exception("Unexpected error validating the TextNow account")
+        return username, credentials, {"base": "unknown"}
+
+    return username, credentials, {}
 
 
 class TextNowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -59,51 +322,85 @@ class TextNowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    def __init__(self) -> None:
+        """Initialize the config flow."""
+        self._reauth_entry: config_entries.ConfigEntry | None = None
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Handle the initial step."""
-        if user_input is None:
-            return self.async_show_form(
-                step_id="user", data_schema=STEP_USER_DATA_SCHEMA
-            )
-
         errors: dict[str, str] = {}
 
-        if not user_input.get("username"):
-            errors["base"] = "username_required"
-        elif not user_input.get("cookie_string"):
-            errors["base"] = "cookie_string_required"
-        else:
-            # Parse cookie string
-            cookie_string = user_input["cookie_string"]
-            cookies = parse_cookie_string(cookie_string)
-            
-            # Validate required cookies
-            if "connect.sid" not in cookies:
-                errors["base"] = "connect_sid_missing"
-            elif "_csrf" not in cookies:
-                errors["base"] = "csrf_missing"
-            elif "XSRF-TOKEN" not in cookies:
-                errors["base"] = "xsrf_token_missing"
-
-        if errors:
-            return self.async_show_form(
-                step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
+        if user_input is not None:
+            username, credentials, errors = await async_validate_account(
+                self.hass,
+                normalize_username(user_input.get(CONF_USERNAME, "")),
+                user_input.get("cookie_string", ""),
             )
 
-        # Parse cookies (already validated above)
-        cookies = parse_cookie_string(user_input["cookie_string"])
-        
-        return self.async_create_entry(
-            title=user_input["username"],
-            data={
-                "username": user_input["username"],
-                "connect_sid": cookies["connect.sid"],
-                "csrf": cookies["_csrf"],
-                "xsrf_token": cookies.get("XSRF-TOKEN", ""),
-                "polling_interval": DEFAULT_POLLING_INTERVAL,
-            },
+            if not errors:
+                await self.async_set_unique_id(username.lower())
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title=username,
+                    data={
+                        CONF_USERNAME: username,
+                        **credentials,
+                        CONF_POLLING_INTERVAL: DEFAULT_POLLING_INTERVAL,
+                    },
+                )
+
+        return self.async_show_form(
+            step_id="user",
+            data_schema=self.add_suggested_values_to_schema(
+                credentials_schema(), user_input or {}
+            ),
+            errors=errors,
+            description_placeholders=form_placeholders(),
+        )
+
+    async def async_step_reauth(
+        self, entry_data: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Handle expired cookies."""
+        self._reauth_entry = self._get_reauth_entry()
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask for a fresh cookie string."""
+        entry = self._reauth_entry
+        if entry is None:
+            return self.async_abort(reason="reauth_failed")
+
+        errors: dict[str, str] = {}
+        stored_username = str(entry.data.get(CONF_USERNAME, ""))
+
+        if user_input is not None:
+            username, credentials, errors = await async_validate_account(
+                self.hass,
+                normalize_username(user_input.get(CONF_USERNAME) or stored_username),
+                user_input.get("cookie_string", ""),
+            )
+
+            if not errors:
+                # Contacts live in this entry's own store, so refreshing the
+                # cookies keeps every contact, sensor and automation intact.
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data={**entry.data, CONF_USERNAME: username, **credentials},
+                )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=self.add_suggested_values_to_schema(
+                credentials_schema(),
+                user_input or {CONF_USERNAME: stored_username},
+            ),
+            errors=errors,
+            description_placeholders=form_placeholders(username=stored_username),
         )
 
     @staticmethod
@@ -112,228 +409,208 @@ class TextNowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         config_entry: config_entries.ConfigEntry,
     ) -> config_entries.OptionsFlow:
         """Create the options flow."""
-        return TextNowOptionsFlowHandler(config_entry)
+        return TextNowOptionsFlowHandler()
 
 
 class TextNowOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow for TextNow."""
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+    def __init__(self) -> None:
         """Initialize options flow."""
-        self._config_entry = config_entry
         self.contact_id: str | None = None
         self.action_type: str | None = None
 
-    @property
-    def config_entry(self) -> config_entries.ConfigEntry:
-        """Return the config entry."""
-        return self._config_entry
-
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Manage the options - main menu."""
-        if user_input is None:
-            return self.async_show_form(
-                step_id="init",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required("option"): vol.In(
-                            {
-                                "account": "Account Settings",
-                                "contacts": "Manage Contacts",
-                            }
-                        ),
-                    }
-                ),
-            )
+    ) -> ConfigFlowResult:
+        """Show the options menu.
 
-        option = user_input.get("option")
-        if option == "account":
-            return await self.async_step_account()
-        if option == "contacts":
-            return await self.async_step_contacts()
-        return await self.async_step_init()
+        A menu is one click per choice, where a dropdown plus Submit was two.
+        """
+        return self.async_show_menu(
+            step_id="init", menu_options=["account", "contacts", "keepalive"]
+        )
+
+    async def async_step_keepalive(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Set up the message that keeps the TextNow number in use."""
+        errors: dict[str, str] = {}
+        storage = TextNowStorage(self.hass, self.config_entry.entry_id)
+        contacts = await storage.async_get_contacts()
+
+        if user_input is not None:
+            phone = str(user_input.get(CONF_KEEPALIVE_PHONE) or "").strip()
+            formatted = ""
+
+            if phone:
+                try:
+                    formatted = format_phone_number(phone)
+                except ValueError:
+                    errors[CONF_KEEPALIVE_PHONE] = "invalid_phone"
+
+            if not errors:
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data={
+                        **self.config_entry.data,
+                        CONF_KEEPALIVE_PHONE: formatted,
+                        CONF_KEEPALIVE_DAYS: int(
+                            user_input.get(CONF_KEEPALIVE_DAYS)
+                            or DEFAULT_KEEPALIVE_DAYS
+                        ),
+                        CONF_KEEPALIVE_MESSAGE: (
+                            str(user_input.get(CONF_KEEPALIVE_MESSAGE) or "").strip()
+                            or DEFAULT_KEEPALIVE_MESSAGE
+                        ),
+                    },
+                )
+                # The reload is what makes the new setting take effect, and it
+                # is also what sends the first message when one is turned on.
+                self.hass.config_entries.async_schedule_reload(
+                    self.config_entry.entry_id
+                )
+                return self.async_create_entry(title="", data={})
+
+        current = self.config_entry.data
+        suggested = user_input or {
+            CONF_KEEPALIVE_PHONE: current.get(CONF_KEEPALIVE_PHONE, ""),
+            CONF_KEEPALIVE_DAYS: current.get(
+                CONF_KEEPALIVE_DAYS, DEFAULT_KEEPALIVE_DAYS
+            ),
+            CONF_KEEPALIVE_MESSAGE: current.get(
+                CONF_KEEPALIVE_MESSAGE, DEFAULT_KEEPALIVE_MESSAGE
+            ),
+        }
+
+        return self.async_show_form(
+            step_id="keepalive",
+            data_schema=self.add_suggested_values_to_schema(
+                keepalive_schema(contacts), suggested
+            ),
+            errors=errors,
+        )
 
     async def async_step_account(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Manage account settings."""
+        errors: dict[str, str] = {}
+
         if user_input is not None:
-            # Parse cookie string
-            cookie_string = user_input["cookie_string"]
-            cookies = parse_cookie_string(cookie_string)
-            
-            # Validate required cookies
-            errors: dict[str, str] = {}
-            if "connect.sid" not in cookies:
-                errors["base"] = "connect_sid_missing"
-            elif "_csrf" not in cookies:
-                errors["base"] = "csrf_missing"
-            elif "XSRF-TOKEN" not in cookies:
-                errors["base"] = "xsrf_token_missing"
-            
-            if errors:
-                # Reconstruct cookie string from existing values for display
-                existing_cookie_string = self._reconstruct_cookie_string()
-                schema = vol.Schema(
-                    {
-                        vol.Required(
-                            "username", default=user_input.get("username", "")
-                        ): str,
-                        vol.Required(
-                            "cookie_string", default=existing_cookie_string
-                        ): str,
-                        vol.Optional(
-                            "polling_interval",
-                            default=user_input.get(
-                                "polling_interval", DEFAULT_POLLING_INTERVAL
-                            ),
-                        ): int,
-                    }
+            username, credentials, errors = await async_validate_account(
+                self.hass,
+                normalize_username(
+                    user_input.get(CONF_USERNAME)
+                    or self.config_entry.data.get(CONF_USERNAME, "")
+                ),
+                user_input.get("cookie_string", ""),
+            )
+
+            if not errors:
+                polling_interval = int(
+                    user_input.get(CONF_POLLING_INTERVAL) or DEFAULT_POLLING_INTERVAL
                 )
-                return self.async_show_form(step_id="account", data_schema=schema, errors=errors)
-            
-            data = dict(self.config_entry.data)
-            data.update(
-                {
-                    "username": user_input["username"],
-                    "connect_sid": cookies["connect.sid"],
-                    "csrf": cookies["_csrf"],
-                    "xsrf_token": cookies.get("XSRF-TOKEN", ""),
-                    "polling_interval": user_input.get(
-                        "polling_interval", DEFAULT_POLLING_INTERVAL
-                    ),
-                }
-            )
-            self.hass.config_entries.async_update_entry(
-                self.config_entry, data=data
-            )
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    title=username,
+                    data={
+                        **self.config_entry.data,
+                        CONF_USERNAME: username,
+                        **credentials,
+                        CONF_POLLING_INTERVAL: polling_interval,
+                    },
+                )
+                # Pick up the new credentials and polling interval right away.
+                self.hass.config_entries.async_schedule_reload(
+                    self.config_entry.entry_id
+                )
+                return self.async_create_entry(title="", data={})
 
-            if "polling_interval" in user_input:
-                domain_data = self.hass.data.get(DOMAIN, {})
-                coordinator = domain_data.get(self.config_entry.entry_id)
-                if coordinator is not None:
-                    coordinator.update_interval = timedelta(
-                        seconds=user_input["polling_interval"]
-                    )
+        suggested = user_input or {
+            CONF_USERNAME: self.config_entry.data.get(CONF_USERNAME, ""),
+            "cookie_string": self._reconstruct_cookie_string(),
+            CONF_POLLING_INTERVAL: self.config_entry.data.get(
+                CONF_POLLING_INTERVAL, DEFAULT_POLLING_INTERVAL
+            ),
+        }
 
-            return self.async_create_entry(title="", data={})
-
-        # Reconstruct cookie string from existing values for display
-        existing_cookie_string = self._reconstruct_cookie_string()
-        
-        schema = vol.Schema(
-            {
-                vol.Required(
-                    "username", default=self.config_entry.data.get("username", "")
-                ): str,
-                vol.Required(
-                    "cookie_string", default=existing_cookie_string
-                ): str,
-                vol.Optional(
-                    "polling_interval",
-                    default=self.config_entry.data.get(
-                        "polling_interval", DEFAULT_POLLING_INTERVAL
-                    ),
-                ): int,
-            }
+        return self.async_show_form(
+            step_id="account",
+            data_schema=self.add_suggested_values_to_schema(
+                credentials_schema(include_polling_interval=True), suggested
+            ),
+            errors=errors,
+            description_placeholders=form_placeholders(),
         )
 
-        return self.async_show_form(step_id="account", data_schema=schema)
-    
     def _reconstruct_cookie_string(self) -> str:
-        """Reconstruct cookie string from stored values for display in edit form."""
-        parts = []
-        if self.config_entry.data.get("connect_sid"):
-            parts.append(f"connect.sid={self.config_entry.data['connect_sid']}")
-        if self.config_entry.data.get("csrf"):
-            parts.append(f"_csrf={self.config_entry.data['csrf']}")
-        if self.config_entry.data.get("xsrf_token"):
-            parts.append(f"XSRF-TOKEN={self.config_entry.data['xsrf_token']}")
-        return "; ".join(parts) if parts else ""
+        """Rebuild the cookie line from the stored cookies for editing."""
+        cookies = dict(self.config_entry.data.get(CONF_COOKIES) or {})
+        for key, name in COOKIE_KEYS.items():
+            if self.config_entry.data.get(key):
+                cookies[name] = self.config_entry.data[key]
+        return "; ".join(f"{name}={value}" for name, value in cookies.items())
 
     async def async_step_contacts(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Manage contacts - menu."""
-        if user_input is None:
-            storage = TextNowStorage(self.hass, self.config_entry.entry_id)
-            contacts = await storage.async_get_contacts()
+    ) -> ConfigFlowResult:
+        """Manage contacts."""
+        storage = TextNowStorage(self.hass, self.config_entry.entry_id)
+        contacts = await storage.async_get_contacts()
 
-            contact_list: list[str] = []
-            if contacts:
-                for contact_id, contact_data in contacts.items():
-                    name = contact_data.get("name", "Unknown")
-                    phone = contact_data.get("phone", "N/A")
-                    contact_list.append(f"• {name} ({phone})")
-                contacts_text = "\n".join(contact_list)
-            else:
-                contacts_text = "No contacts added yet."
-
-            return self.async_show_form(
-                step_id="contacts",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required("action"): vol.In(
-                            {
-                                "add": "Add New Contact",
-                                "edit": "Edit Existing Contact",
-                                "delete": "Delete Contact",
-                                "back": "← Back to Main Menu",
-                            }
-                        ),
-                    }
-                ),
-                description_placeholders={"contacts": contacts_text},
+        if contacts:
+            contacts_text = "\n".join(
+                f"- {data.get('name', 'Unknown')} — "
+                f"{readable_phone_number(data.get('phone', ''))}"
+                for data in contacts.values()
             )
+        else:
+            contacts_text = "No contacts yet."
 
-        action = user_input.get("action")
-        if action == "add":
-            return await self.async_step_add_contact()
-        if action == "edit":
-            self.action_type = "edit"
-            return await self.async_step_select_contact()
-        if action == "delete":
-            self.action_type = "delete"
-            return await self.async_step_select_contact()
-        if action == "back":
-            return await self.async_step_init()
-        return await self.async_step_contacts()
+        menu_options = ["add_contact"]
+        if contacts:
+            menu_options += ["pick_edit", "pick_delete"]
+        menu_options.append("init")
+
+        return self.async_show_menu(
+            step_id="contacts",
+            menu_options=menu_options,
+            description_placeholders={"contacts": contacts_text},
+        )
+
+    async def async_step_pick_edit(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose a contact to edit."""
+        self.action_type = "edit"
+        return await self.async_step_select_contact()
+
+    async def async_step_pick_delete(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose a contact to remove."""
+        self.action_type = "delete"
+        return await self.async_step_select_contact()
 
     async def async_step_add_contact(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Add a new contact."""
         errors: dict[str, str] = {}
+        formatted_phone = ""
 
-        if user_input is None:
+        if user_input is not None:
+            try:
+                formatted_phone = format_phone_number(user_input["phone"])
+            except ValueError:
+                errors["phone"] = "invalid_phone"
+
+        if user_input is None or errors:
             return self.async_show_form(
                 step_id="add_contact",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required("name"): str,
-                        vol.Required("phone"): str,
-                    }
-                ),
-            )
-
-        # Format and validate phone number
-        try:
-            formatted_phone = format_phone_number(user_input["phone"])
-        except ValueError:
-            errors["base"] = "invalid_phone"
-            return self.async_show_form(
-                step_id="add_contact",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required(
-                            "name", default=user_input.get("name", "")
-                        ): str,
-                        vol.Required(
-                            "phone", default=user_input.get("phone", "")
-                        ): str,
-                    }
+                data_schema=self.add_suggested_values_to_schema(
+                    contact_schema(), user_input or {}
                 ),
                 errors=errors,
             )
@@ -368,7 +645,7 @@ class TextNowOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_select_contact(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Select a contact for edit or delete."""
         if not self.action_type:
             return await self.async_step_contacts()
@@ -380,22 +657,29 @@ class TextNowOptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_abort(reason="no_contacts")
 
         if user_input is None:
-            contact_options: dict[str, str] = {}
-            for contact_id, contact_data in contacts.items():
-                name = contact_data.get("name", "Unknown")
-                phone = contact_data.get("phone", "N/A")
-                contact_options[contact_id] = f"{name} ({phone})"
-
+            options = [
+                selector.SelectOptionDict(
+                    value=contact_id,
+                    label=(
+                        f"{data.get('name', 'Unknown')} — "
+                        f"{readable_phone_number(data.get('phone', ''))}"
+                    ),
+                )
+                for contact_id, data in contacts.items()
+            ]
             return self.async_show_form(
                 step_id="select_contact",
                 data_schema=vol.Schema(
                     {
-                        vol.Required("contact_id"): vol.In(contact_options),
+                        vol.Required("contact_id"): selector.SelectSelector(
+                            selector.SelectSelectorConfig(
+                                options=options,
+                                mode=selector.SelectSelectorMode.LIST,
+                            )
+                        ),
                     }
                 ),
-                description_placeholders={
-                    "action": self.action_type.capitalize()
-                },
+                description_placeholders={"action": self.action_type},
             )
 
         contact_id = user_input.get("contact_id")
@@ -412,7 +696,7 @@ class TextNowOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_confirm_delete(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Confirm contact deletion."""
         if not self.contact_id:
             return await self.async_step_contacts()
@@ -449,7 +733,7 @@ class TextNowOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_edit_contact(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Edit a contact."""
         if not self.contact_id:
             return await self.async_step_contacts()
@@ -462,37 +746,26 @@ class TextNowOptionsFlowHandler(config_entries.OptionsFlow):
 
         contact = contacts[self.contact_id]
         errors: dict[str, str] = {}
+        formatted_phone = ""
 
-        if user_input is None:
-            display_phone = contact.get("phone", "").replace("+1", "")
+        if user_input is not None:
+            try:
+                formatted_phone = format_phone_number(user_input["phone"])
+            except ValueError:
+                errors["phone"] = "invalid_phone"
+
+        if user_input is None or errors:
+            suggested = user_input or {
+                "name": contact.get("name", ""),
+                "phone": contact.get("phone", "").replace("+1", ""),
+            }
             return self.async_show_form(
                 step_id="edit_contact",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required(
-                            "name", default=contact.get("name", "")
-                        ): str,
-                        vol.Required("phone", default=display_phone): str,
-                    }
-                ),
-            )
-
-        try:
-            formatted_phone = format_phone_number(user_input["phone"])
-        except ValueError:
-            errors["base"] = "invalid_phone"
-            display_phone = user_input.get("phone", "").replace("+1", "")
-            return self.async_show_form(
-                step_id="edit_contact",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required(
-                            "name", default=user_input.get("name", "")
-                        ): str,
-                        vol.Required("phone", default=display_phone): str,
-                    }
+                data_schema=self.add_suggested_values_to_schema(
+                    contact_schema(), suggested
                 ),
                 errors=errors,
+                description_placeholders={"name": contact.get("name", "")},
             )
 
         await storage.async_save_contact(

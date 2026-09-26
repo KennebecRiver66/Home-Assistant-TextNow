@@ -1,7 +1,11 @@
 """Constants for the TextNow integration."""
+from datetime import timedelta
 from typing import Final
 
 DOMAIN: Final = "textnow"
+
+# Device name; entity IDs are derived from it, so keep it short
+DEVICE_NAME: Final = "TextNow"
 
 # Event types
 EVENT_MESSAGE_RECEIVED: Final = "textnow_message_received"
@@ -11,9 +15,41 @@ EVENT_REPLY_PARSED: Final = "textnow_reply_parsed"
 STORAGE_KEY: Final = f"{DOMAIN}.storage"
 STORAGE_VERSION: Final = 1
 
+# Config entry data keys
+CONF_USERNAME: Final = "username"
+CONF_COOKIES: Final = "cookies"
+CONF_POLLING_INTERVAL: Final = "polling_interval"
+CONF_ENTITY_IDS_MIGRATED: Final = "entity_ids_migrated"
+CONF_KEEPALIVE_PHONE: Final = "keepalive_phone"
+CONF_KEEPALIVE_DAYS: Final = "keepalive_days"
+CONF_KEEPALIVE_MESSAGE: Final = "keepalive_message"
+
+# Where the cookie instructions live, used by the repair item and the forms
+COOKIE_HELP_URL: Final = (
+    "https://github.com/KennebecRiver66/Home-Assistant-TextNow"
+    "#getting-your-cookies"
+)
+
 # Defaults
 DEFAULT_POLLING_INTERVAL: Final = 30  # seconds
+MIN_POLLING_INTERVAL: Final = 15  # seconds
+MAX_POLLING_INTERVAL: Final = 600  # seconds
 DEFAULT_TTL_SECONDS: Final = 300  # 5 minutes
+
+# Upper bound for the backoff applied after repeated polling failures
+MAX_BACKOFF_INTERVAL: Final = timedelta(minutes=15)
+
+# TextNow gives an unused number back to the pool. The exact idle time is not
+# published and has changed over the years, so the default leaves room under a
+# week rather than sitting on the edge of it.
+DEFAULT_KEEPALIVE_DAYS: Final = 5
+MIN_KEEPALIVE_DAYS: Final = 1
+MAX_KEEPALIVE_DAYS: Final = 30
+DEFAULT_KEEPALIVE_MESSAGE: Final = (
+    "Keeping this TextNow number in use. Sent by Home Assistant, no reply needed."
+)
+# How long to wait before trying a keep-alive again after one did not go out.
+KEEPALIVE_RETRY_INTERVAL: Final = timedelta(hours=1)
 
 # Attributes
 ATTR_PHONE: Final = "phone"

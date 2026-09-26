@@ -19,6 +19,10 @@
 - [Features](#features)
 - [Installation](#installation)
 - [Initial Configuration](#initial-configuration)
+  - [Getting your cookies](#getting-your-cookies)
+  - [When the session expires](#when-the-session-expires)
+- [The TextNow panel](#the-textnow-panel)
+- [Keeping your TextNow number](#keeping-your-textnow-number)
 - [Managing Contacts](#managing-contacts)
 - [Services](#services)
   - [textnow.send](#textnowsend)
@@ -29,6 +33,7 @@
 - [Automation Examples](#automation-examples)
 - [Template Variables](#template-variables)
 - [Troubleshooting](#troubleshooting)
+- [Upgrading to 1.2.0](#upgrading-to-120)
 
 ---
 
@@ -44,6 +49,7 @@
 | **Phrase Triggers** | Trigger automations when a specific phrase is received |
 | **Auto-Reply** | Automatically reply to whoever triggered the automation |
 | **Contact Sensors** | Track message history per contact |
+| **Connection Status** | `sensor.textnow_status` plus a repair notice and re-auth prompt when the session expires |
 
 ---
 
@@ -69,45 +75,160 @@
 
 ## Initial Configuration
 
-### Step 1: Get Your TextNow Username
+TextNow has no public API and no app password, so Home Assistant signs in by
+reusing the cookies from a browser that is already signed in. There is no
+username/password option: TextNow's login is protected by PerimeterX bot
+detection, which blocks scripted sign-ins (see
+[Why cookies and not a password](#why-cookies-and-not-a-password)).
 
-1. Go to [textnow.com](https://www.textnow.com) and sign in
-2. Click **Settings** (gear icon)
-3. Your username is displayed on the settings page
-   - ⚠️ Use your **username**, NOT your email address
+### Getting your cookies
 
-### Step 2: Get Your Browser Cookies
+The quickest way needs no understanding of HTTP headers — five clicks and one
+paste:
 
-1. While logged into TextNow, press **F12** (Developer Tools)
-2. Click the **Network** tab
-3. Refresh the page (F5)
-4. Click any network request
-5. Find the **Cookie** header in Request Headers
-6. Copy the entire cookie string
+1. Sign in to [textnow.com](https://www.textnow.com) in a desktop browser
+   (Chrome, Edge or Firefox).
+2. Press **F12** to open developer tools, then pick the **Network** tab.
+3. Reload the page (**F5**), then type `messages` in the filter box.
+4. Right-click the first row in the list and choose **Copy** → **Copy as cURL**.
+5. In Home Assistant, go to **Settings** → **Devices & Services** →
+   **+ Add Integration** → **TextNow**, paste into the **Cookies** box and
+   press **Submit**.
 
-**Required cookies:** `connect.sid`, `_csrf`, `XSRF-TOKEN`
+Leave **Username** empty: it is read from the pasted request. Nothing else
+needs to be picked out of the paste — the cookies the integration needs
+(`connect.sid`, `_csrf`, `XSRF-TOKEN`) plus TextNow's bot-protection cookies
+are extracted for you, and the credentials are checked against TextNow before
+the entry is created, so a bad paste is reported immediately instead of
+failing silently later.
 
-### Step 3: Add the Integration
+> `Copy as cURL` output contains your live session. Treat it like a password:
+> paste it straight into Home Assistant and don't share it anywhere else.
 
-1. Go to **Settings** → **Devices & Services**
-2. Click **+ Add Integration**
-3. Search for **TextNow**
-4. Enter username and paste cookie string
-5. Click **Submit**
+### If you prefer copying the cookie line
+
+In the same request row, open **Request headers**, find the **cookie** line and
+copy all of it. The **Cookies** box also accepts:
+
+| What you paste | Works |
+|----------------|-------|
+| `Copy as cURL` command | ✅ username detected too |
+| The whole `cookie:` header line | ✅ |
+| The devtools **Application → Cookies** table (tab separated rows) | ✅ |
+| A JSON export from a cookie manager extension | ✅ |
+| `document.cookie` from the console | ⚠️ usually **not** enough — `connect.sid` is HttpOnly and hidden from the console |
+
+When you paste a plain cookie line, fill in **Username** with the name from
+**Settings → Account** on textnow.com (not your email address).
+
+### When the session expires
+
+TextNow signs saved sessions out eventually. When that happens the integration
+does not go quiet:
+
+- Polling stops instead of retrying a rejected session thousands of times a day
+- A repair notice appears in **Settings** → **Devices & Services**
+- The integration asks for re-authentication: paste a fresh cookie line and
+  everything resumes. **Your contacts, entities and automations are kept** —
+  there is no need to delete and re-add the integration
+- `sensor.textnow_status` reads `New cookies needed`, so it can be used in a
+  dashboard card or an alert automation
+
+---
+
+## The TextNow panel
+
+After the first account is added, **TextNow** appears in the Home Assistant
+sidebar. It is the one place that answers "is this working?" and "who can it
+text?", and it needs no YAML.
+
+![The contacts tab of the TextNow panel](images/panel-contacts.png)
+
+**Contacts** lists everyone the integration can text. Each row sends a
+message, edits the name or number, or removes the contact. Adding one is a
+name and ten digits; the number is formatted as it is typed and each contact
+gets its own sensor.
+
+**Connection** shows the account, when messages were last checked, how often
+they are being checked right now, whether the number is being kept in use, and
+the last error if there was one.
+
+![The connection tab of the TextNow panel](images/panel-connection.png)
+
+**Help** has the five-step cookie walkthrough, so the instructions are still
+reachable when the integration is the only thing you have open.
+
+The panel works in light and dark themes, follows the theme's colours, and is
+laid out for a phone as well as a desktop.
+
+### Seeing the status at a glance
+
+Every state is written out in plain language rather than left to a colour.
+
+![The panel asking for a new sign-in](images/panel-sign-in-needed.png)
+
+| Status | What it means |
+|--------|---------------|
+| **Connected** | Messages are being sent and received |
+| **Sign-in needed** | TextNow signed the saved session out; paste a fresh cookie line to fix it |
+| **Offline** | TextNow could not be reached; Home Assistant is retrying on its own, waiting longer after each failure |
+| **Not running** | The account is switched off or failed to start |
+
+An account that needs a new sign-in keeps its panel, its contacts and its
+automations. **Fix this now** goes straight to the re-authentication prompt.
+
+---
+
+## Keeping your TextNow number
+
+A free TextNow number is only yours while it is being used. Leave it idle and
+TextNow returns it to the pool, which costs you the number your contacts reply
+to and breaks every automation pointed at it.
+
+Only **sending** counts. Receiving messages does not. That makes the risk worst
+for exactly the setups that need the integration most: a number reserved for
+power cuts, water leaks or alarms can quietly expire in between the emergencies
+it exists for.
+
+The integration can guard against this. Go to **Settings** → **Devices &
+Services** → **TextNow** → **Configure** → **Keep the number in use**:
+
+| Setting | Meaning |
+|---------|---------|
+| **Send it to** | A contact, or any 10-digit number. Your own phone is the usual choice. Leave it empty to turn the whole thing off |
+| **Only when nothing was sent for** | How many idle days may pass first. Default 5, adjustable from 1 to 30 |
+| **Message to send** | The text itself. The default says where it came from so it does not read as spam |
+
+Anything the account sends resets the clock — a service call, a menu, an MMS,
+or a message sent from the panel. A house whose automations text every couple
+of days will never send one of these.
+
+The default is five days rather than seven on purpose: TextNow does not publish
+how long a number may sit idle and the rule has changed over the years, so the
+default leaves margin instead of sitting on the edge of it.
+
+The Connection tab says so when nothing is guarding the number:
+
+![The panel warning that the number could be reclaimed](images/panel-number-at-risk.png)
+
+Once it is turned on, the same place shows when the last message went out and
+when the next one is due, with a **Send one now** button to test it.
+
+A keep-alive cannot run while the session is expired, which is the moment the
+number is most at risk, so the panel says the keep-alive is paused rather than
+claiming the number is safe. Fixing the sign-in is what protects it. `sensor.textnow_status` carries the same information in its
+`last_message_sent`, `keepalive_phone` and `keepalive_due` attributes, so an
+automation can watch it.
 
 ---
 
 ## Managing Contacts
 
-### Adding a Contact
+From the panel: open **TextNow** in the sidebar, then **Add contact** on the
+Contacts tab. Enter a name and a 10-digit number and it is saved right away.
 
-1. Go to **Settings** → **Devices & Services** → **TextNow**
-2. Click **Configure**
-3. Select **Add Contact**
-4. Enter:
-   - **Name**: Contact's name (e.g., "John")
-   - **Phone**: 10-digit phone number (e.g., "5551234567")
-5. Click **Submit**
+From the settings pages: **Settings** → **Devices & Services** → **TextNow** →
+**Configure** → **Contacts**, which can also add, edit and remove contacts.
 
 Each contact creates a sensor: `sensor.textnow_<name>`
 
@@ -506,6 +627,15 @@ Each contact creates a sensor: `sensor.textnow_<contact_name>`
 
 ## Troubleshooting
 
+### Checking the connection
+
+| Where | What it tells you |
+|-------|-------------------|
+| `sensor.textnow_status` | `Connected`, `Disconnected` or `New cookies needed` |
+| TextNow sidebar panel → **Status** | Per-account state, polling interval and the last error |
+| **Settings** → **Devices & Services** | A repair notice when the session needs renewing |
+| Integration → **⋮** → **Download diagnostics** | State for a bug report, with cookies, username and phone numbers redacted |
+
 ### Triggers Not Firing
 
 1. Ensure sender is a saved contact
@@ -518,15 +648,44 @@ logger:
     custom_components.textnow: debug
 ```
 
+### Authentication Errors
+
+The integration reports two different failures, because they need different
+fixes:
+
+- **`New cookies needed` / HTTP 401** — the saved session expired. Paste a
+  fresh cookie line into the re-authentication prompt.
+- **HTTP 403 with bot protection** — PerimeterX rejected the request. Sign in
+  to TextNow in a normal browser, solve any challenge it shows, then paste a
+  fresh `Copy as cURL` (it carries the bot-protection cookies as well).
+  Raising the polling interval in the integration options makes this rarer.
+
+Polling stops on both, so a broken session logs one message rather than
+filling the log.
+
 ### Menu Not Waiting
 
 - Increase `timeout` value
 - Verify `response_variable` is set
 
-### Authentication Errors
+### Why cookies and not a password
 
-- Cookies expire periodically
-- Re-copy fresh cookies from browser
+TextNow's sign-in page is behind PerimeterX bot detection, which is designed
+to block exactly what a Home Assistant integration would have to do. An
+email/password login would work on some networks and fail on others, and would
+break whenever the challenge changes — so this integration does not pretend to
+offer one. Reusing a browser session is the honest trade-off: one paste, and
+the session is then kept alive automatically for as long as TextNow allows.
+
+### Why messages are polled
+
+TextNow's web client keeps a push channel open, but it is undocumented and
+authenticated separately, and getting it wrong means silently receiving
+nothing. Until that channel can be verified against a live account, receiving
+uses polling, with every rotated session cookie followed so the session stays
+valid, and backoff so failures do not turn into thousands of requests.
+`Check for new messages every` in the integration options controls the
+trade-off between how fast messages arrive and how much traffic TextNow sees.
 
 ### Finding Device ID
 
@@ -538,9 +697,34 @@ logger:
 
 ## Requirements
 
-- Home Assistant 2023.7.0+
+- Home Assistant 2024.11.0+
 - Valid TextNow account
 - Active browser session cookies
+
+---
+
+## Upgrading to 1.2.0
+
+**Contact sensors are renamed.** Entity IDs used to be built from the device
+name and a duplicated prefix, producing IDs such as
+`sensor.sms_text_messages_textnow_textnow_sam`. They are now
+`sensor.textnow_<contact>`, for example `sensor.textnow_sam`.
+
+Existing sensors are renamed automatically on the first start after the
+update, once per account. **Automations, scripts and dashboards that reference
+the old entity IDs must be updated**, so check for the old names after
+updating (Developer tools → Template, or search your YAML for `textnow_`).
+Nothing else is lost: contacts, the device, and its triggers keep working, and
+a sensor that had been renamed by hand is left alone.
+
+Also new in 1.2.0:
+
+- `sensor.textnow_status` reports the connection state
+- Expired sessions raise a repair notice and a re-authentication prompt
+  instead of silently logging 401s
+- Diagnostics can be downloaded from the integration page
+- An optional keep-alive message stops TextNow reclaiming an idle number, see
+  [Keeping your TextNow number](#keeping-your-textnow-number)
 
 ---
 

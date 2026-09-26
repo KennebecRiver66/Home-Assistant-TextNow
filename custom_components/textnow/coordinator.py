@@ -2,15 +2,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import Any
+from http.cookies import SimpleCookie
+from typing import Any, Final
 from urllib.parse import unquote
 
 import aiohttp
 
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
+from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -23,16 +29,317 @@ from .const import (
     ATTR_MESSAGE_ID,
     ATTR_TIMESTAMP,
     ATTR_CONTACT_ID,
-    ATTR_KEY,
     ATTR_TYPE,
     ATTR_VALUE,
     ATTR_RAW_TEXT,
     ATTR_OPTION_INDEX,
+    CONF_COOKIES,
+    CONF_KEEPALIVE_DAYS,
+    CONF_KEEPALIVE_MESSAGE,
+    CONF_KEEPALIVE_PHONE,
+    CONF_POLLING_INTERVAL,
+    CONF_USERNAME,
+    COOKIE_HELP_URL,
+    DEFAULT_KEEPALIVE_DAYS,
+    DEFAULT_KEEPALIVE_MESSAGE,
+    DEFAULT_POLLING_INTERVAL,
+    KEEPALIVE_RETRY_INTERVAL,
+    MAX_BACKOFF_INTERVAL,
+    MAX_KEEPALIVE_DAYS,
+    MIN_KEEPALIVE_DAYS,
+    MIN_POLLING_INTERVAL,
 )
 from .parsing import parse_reply
 from .storage import TextNowStorage
 
 _LOGGER = logging.getLogger(__name__)
+
+BASE_URL: Final = "https://www.textnow.com"
+
+# Keep the client fingerprint coherent and current: TextNow sits behind
+# PerimeterX, which scores requests that claim to be Chrome but omit the
+# headers a real Chrome always sends.
+CHROME_VERSION: Final = "153"
+USER_AGENT: Final = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    f"(KHTML, like Gecko) Chrome/{CHROME_VERSION}.0.0.0 Safari/537.36"
+)
+BROWSER_HEADERS: Final[dict[str, str]] = {
+    "User-Agent": USER_AGENT,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": f"{BASE_URL}/messaging",
+    "Origin": BASE_URL,
+    "X-Requested-With": "XMLHttpRequest",
+    "sec-ch-ua": (
+        f'"Chromium";v="{CHROME_VERSION}", "Not(A:Brand";v="24", '
+        f'"Google Chrome";v="{CHROME_VERSION}"'
+    ),
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+}
+
+# Config entry data key -> browser cookie name
+COOKIE_KEYS: Final[dict[str, str]] = {
+    "connect_sid": "connect.sid",
+    "csrf": "_csrf",
+    "xsrf_token": "XSRF-TOKEN",
+}
+
+REQUEST_TIMEOUT: Final = aiohttp.ClientTimeout(
+    total=45, connect=15, sock_connect=15, sock_read=30
+)
+UPLOAD_TIMEOUT: Final = aiohttp.ClientTimeout(total=180, connect=15, sock_connect=15)
+
+MAX_ATTEMPTS: Final = 3
+RETRY_DELAY: Final = 2.0
+AUTH_STATUSES: Final = frozenset({401, 419})
+RETRY_STATUSES: Final = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+# Markers PerimeterX puts in its block pages.
+BOT_BLOCK_MARKERS: Final = (
+    "perimeterx",
+    "px-captcha",
+    "_pxhd",
+    "access to this page has been denied",
+)
+
+# Session cookies rotate on almost every call, so only write the refreshed
+# values to the config entry occasionally unless the login cookie itself moved.
+COOKIE_PERSIST_INTERVAL: Final = timedelta(minutes=15)
+
+
+class TextNowError(HomeAssistantError):
+    """Base class for TextNow API problems."""
+
+
+class TextNowAuthError(TextNowError):
+    """Raised when TextNow no longer accepts the stored browser session."""
+
+
+class TextNowBlockedError(TextNowAuthError):
+    """Raised when TextNow's bot protection blocks the request."""
+
+    issue_key = "bot_blocked"
+
+
+class TextNowConnectionError(TextNowError):
+    """Raised when TextNow cannot be reached."""
+
+
+class TextNowApiError(TextNowError):
+    """Raised when TextNow answers with something unexpected."""
+
+
+def cookies_from_entry_data(data: dict[str, Any]) -> dict[str, str]:
+    """Return the cookies to replay for a stored account.
+
+    Everything the user pasted is replayed, not just the session cookies:
+    the bot protection cookies are part of what makes a request look like
+    the browser the session was created in.
+    """
+    cookies = {
+        str(name): str(value)
+        for name, value in (data.get(CONF_COOKIES) or {}).items()
+        if value
+    }
+    # Accounts set up before the full cookie bag was stored
+    for key, name in COOKIE_KEYS.items():
+        if data.get(key) and name not in cookies:
+            cookies[name] = str(data[key])
+    return cookies
+
+
+def csrf_token(cookies: dict[str, str]) -> str:
+    """Return the value TextNow expects in the X-CSRF-Token header.
+
+    The XSRF-TOKEN cookie holds the plain token. When it is missing the token
+    has to be recovered from the URL encoded _csrf cookie.
+    """
+    xsrf = str(cookies.get("XSRF-TOKEN") or "")
+    if xsrf:
+        return xsrf
+    csrf = str(cookies.get("_csrf") or "")
+    if csrf.startswith("s%3A"):
+        return unquote(csrf)
+    return csrf
+
+
+def build_headers(
+    cookies: dict[str, str], extra: dict[str, str] | None = None
+) -> dict[str, str]:
+    """Return the headers a TextNow web session sends on every call."""
+    headers = {**BROWSER_HEADERS, "X-CSRF-Token": csrf_token(cookies)}
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def _raise_for_auth_status(status: int, body: str) -> None:
+    """Raise the error that matches a rejected request.
+
+    A 401 is an expired session. A 403 is either the same thing or the bot
+    protection stepping in; both need fresh cookies but the advice differs.
+    """
+    if status == 403:
+        lowered = body.lower()
+        if any(marker in lowered for marker in BOT_BLOCK_MARKERS):
+            raise TextNowBlockedError(
+                "TextNow's bot protection blocked Home Assistant (HTTP 403). "
+                "Fresh cookies from a browser session are needed"
+            )
+        raise TextNowAuthError(
+            "TextNow refused the request (HTTP 403); the saved cookies are "
+            "no longer valid"
+        )
+    raise TextNowAuthError(
+        f"TextNow rejected the session (HTTP {status}); the saved cookies are "
+        "no longer valid"
+    )
+
+
+def _parse_json_body(body: str) -> Any:
+    """Return the decoded API payload.
+
+    An expired session makes TextNow answer with the sign-in page instead of
+    JSON, which has to be reported as an authentication problem.
+    """
+    stripped = body.lstrip()
+    if not stripped:
+        return {}
+    if stripped.startswith("<"):
+        raise TextNowAuthError(
+            "TextNow returned a web page instead of API data, "
+            "which means the browser session has expired"
+        )
+    try:
+        return json.loads(stripped)
+    except ValueError as err:
+        raise TextNowApiError(
+            f"Could not read the TextNow response: {stripped[:200]}"
+        ) from err
+
+
+async def async_api_request(
+    session: aiohttp.ClientSession,
+    method: str,
+    url: str,
+    *,
+    headers_factory: Callable[[], dict[str, str]],
+    cookies_factory: Callable[[], dict[str, str]] | None = None,
+    cookie_sink: Callable[[SimpleCookie], None] | None = None,
+    params: dict[str, str] | None = None,
+    json_data: Any = None,
+    data: Any = None,
+    timeout: aiohttp.ClientTimeout = REQUEST_TIMEOUT,
+    parse_json: bool = True,
+    attempts: int = MAX_ATTEMPTS,
+    check_auth: bool = True,
+) -> Any:
+    """Call the TextNow API and retry the failures worth retrying.
+
+    Cookies and headers are rebuilt for every attempt, and the cookies
+    TextNow sends back are handed to the caller, so a rotated session is
+    followed instead of replaying the values the session started with.
+    """
+    last_error = "no attempt was made"
+
+    for attempt in range(1, attempts + 1):
+        try:
+            async with session.request(
+                method,
+                url,
+                params=params,
+                json=json_data,
+                data=data,
+                headers=headers_factory(),
+                cookies=cookies_factory() if cookies_factory else None,
+                timeout=timeout,
+            ) as response:
+                # Read the new cookies first: a rejected request still
+                # carries the values the next attempt should use.
+                if cookie_sink is not None and response.cookies:
+                    cookie_sink(response.cookies)
+
+                if check_auth and (
+                    response.status in AUTH_STATUSES or response.status == 403
+                ):
+                    _raise_for_auth_status(response.status, await response.text())
+                if response.status not in RETRY_STATUSES:
+                    if response.status >= 400:
+                        body = await response.text()
+                        raise TextNowApiError(
+                            f"TextNow returned HTTP {response.status}: {body[:200]}"
+                        )
+                    if not parse_json:
+                        return await response.read()
+                    return _parse_json_body(await response.text())
+                last_error = f"HTTP {response.status}"
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
+            last_error = f"{type(err).__name__}: {err}"
+
+        if attempt < attempts:
+            delay = RETRY_DELAY * attempt
+            _LOGGER.debug(
+                "TextNow request %s %s failed (%s), retrying in %s s",
+                method,
+                url,
+                last_error,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+    raise TextNowConnectionError(
+        f"TextNow did not answer after {attempts} attempts: {last_error}"
+    )
+
+
+@callback
+def _async_release_session(session: aiohttp.ClientSession | None) -> None:
+    """Give up a session created with auto_cleanup disabled.
+
+    The connector belongs to Home Assistant and is shared with every other
+    integration, so the session is detached rather than closed. Home Assistant
+    also replaces close() on the sessions it hands out with a shim that only
+    logs "this integration closes the Home Assistant aiohttp session" and asks
+    the user to file a bug report, so calling it would warn and still leak.
+    """
+    if session is not None and not session.closed:
+        session.detach()
+
+
+async def async_validate_session(
+    hass: HomeAssistant, username: str, cookies: dict[str, str]
+) -> None:
+    """Check a username and cookie set against the TextNow API.
+
+    Raises TextNowAuthError, TextNowConnectionError or TextNowApiError.
+    """
+    session = async_create_clientsession(
+        hass,
+        auto_cleanup=False,
+        cookie_jar=aiohttp.DummyCookieJar(),
+        timeout=REQUEST_TIMEOUT,
+    )
+    try:
+        await async_api_request(
+            session,
+            "GET",
+            f"{BASE_URL}/api/users/{username}/messages",
+            headers_factory=lambda: build_headers(cookies),
+            cookies_factory=lambda: cookies,
+            params={
+                "start_message_id": "0",
+                "direction": "future",
+                "page_size": "1",
+            },
+            attempts=2,
+        )
+    finally:
+        _async_release_session(session)
 
 
 class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
@@ -43,184 +350,508 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
         self.entry = entry
         self.storage = TextNowStorage(hass, entry.entry_id)
         self.session: aiohttp.ClientSession | None = None
-        self._allowed_phones = entry.data.get("allowed_phones", [])
-        self._username = entry.data.get("username", "")
-        self._connect_sid = entry.data.get("connect_sid", "")
-        self._csrf = entry.data.get("csrf", "")
-        self._xsrf_token = entry.data.get("xsrf_token", "")
-        self._base_url = "https://www.textnow.com"
-
-        polling_interval = entry.data.get("polling_interval", 30)
+        self.auth_failed = False
+        self.last_success: datetime | None = None
+        self._config: dict[str, Any] = dict(entry.data)
+        self._cookies: dict[str, str] = cookies_from_entry_data(entry.data)
+        self._last_cookie_write: datetime | None = None
+        self._failures = 0
+        self._last_outbound: datetime | None = None
+        self._last_outbound_read = False
+        self._keepalive_checked: datetime | None = None
+        self._keepalive_task: asyncio.Task[bool] | None = None
 
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(seconds=polling_interval),
+            update_interval=timedelta(seconds=self.polling_interval),
         )
+
+    @property
+    def username(self) -> str:
+        """Return the TextNow username this entry talks to."""
+        return str(self._config.get(CONF_USERNAME, ""))
+
+    @property
+    def polling_interval(self) -> int:
+        """Return the configured polling interval in seconds."""
+        try:
+            interval = int(
+                self._config.get(CONF_POLLING_INTERVAL, DEFAULT_POLLING_INTERVAL)
+            )
+        except (TypeError, ValueError):
+            interval = DEFAULT_POLLING_INTERVAL
+        return max(MIN_POLLING_INTERVAL, interval)
+
+    @property
+    def keepalive_phone(self) -> str:
+        """Return the number the keep-alive texts, or "" when it is off."""
+        return str(self._config.get(CONF_KEEPALIVE_PHONE) or "")
+
+    @property
+    def keepalive_days(self) -> int:
+        """Return how many idle days may pass before a keep-alive is sent."""
+        try:
+            days = int(self._config.get(CONF_KEEPALIVE_DAYS) or DEFAULT_KEEPALIVE_DAYS)
+        except (TypeError, ValueError):
+            days = DEFAULT_KEEPALIVE_DAYS
+        return min(MAX_KEEPALIVE_DAYS, max(MIN_KEEPALIVE_DAYS, days))
+
+    @property
+    def keepalive_message(self) -> str:
+        """Return the text the keep-alive sends."""
+        return (
+            str(self._config.get(CONF_KEEPALIVE_MESSAGE) or "").strip()
+            or DEFAULT_KEEPALIVE_MESSAGE
+        )
+
+    @property
+    def last_outbound(self) -> datetime | None:
+        """Return when this account last sent anything."""
+        return self._last_outbound
+
+    @property
+    def keepalive_due_at(self) -> datetime | None:
+        """Return when the next keep-alive would be sent, if it is on."""
+        if not self.keepalive_phone or self._last_outbound is None:
+            return None
+        return self._last_outbound + timedelta(days=self.keepalive_days)
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from TextNow."""
         try:
-            await self._ensure_session()
             await self._poll_unread_messages()
             await self._cleanup_expired_pending()
-            return {}
-        except Exception as err:
-            raise UpdateFailed(f"Error communicating with TextNow: {err}") from err
+        except TextNowAuthError as err:
+            self._async_pause_polling()
+            self._async_report_auth_problem(err)
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except TextNowError as err:
+            self._async_back_off()
+            raise UpdateFailed(str(err)) from err
 
-    def _get_csrf_header_value(self) -> str:
-        """Get the correct CSRF token value for X-CSRF-Token header.
-        
-        Deterministic logic from API documentation (matching server.py):
-        1. Use XSRF-TOKEN cookie value if present
-        2. If _csrf starts with 's%3A', URL-decode it
-        3. Otherwise, use raw _csrf value
+        self._async_resume_normal_polling()
+        self._async_schedule_keepalive()
+        return {}
+
+    @callback
+    def _async_schedule_keepalive(self) -> None:
+        """Check the keep-alive without holding up the poll.
+
+        Sending is a round trip to TextNow, and this runs off the back of
+        every poll, including the one that sets the entry up.
         """
-        # First priority: Use XSRF-TOKEN cookie value if available
-        if self._xsrf_token:
-            return self._xsrf_token
-        # Fallback: If _csrf starts with 's%3A', it's URL-encoded and needs decoding
-        if self._csrf.startswith('s%3A'):
-            return unquote(self._csrf)
-        # Otherwise use _csrf as-is
-        return self._csrf
-
-    async def _ensure_session(self) -> None:
-        """Ensure aiohttp session is initialized."""
-        if self.session is None or self.session.closed:
-            csrf_header_value = self._get_csrf_header_value()
-            cookies = {
-                "connect.sid": self._connect_sid,
-                "_csrf": self._csrf,
-            }
-            # Add XSRF-TOKEN cookie if available
-            if self._xsrf_token:
-                cookies["XSRF-TOKEN"] = self._xsrf_token
-            
-            self.session = aiohttp.ClientSession(
-                cookies=cookies,
-                headers={
-                    "X-CSRF-Token": csrf_header_value,
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/plain, */*",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Referer": f"{self._base_url}/messaging",
-                    "Origin": self._base_url,
-                },
-            )
-
-    async def async_shutdown(self) -> None:
-        """Close the session on shutdown."""
-        if self.session and not self.session.closed:
-            await self.session.close()
-
-    async def _poll_unread_messages(self) -> None:
-        """Poll for unread messages."""
-        if self.session is None:
+        if not self.keepalive_phone:
             return
+        if self._keepalive_task is not None and not self._keepalive_task.done():
+            return
+        if (
+            self._keepalive_checked is not None
+            and dt_util.utcnow() - self._keepalive_checked < KEEPALIVE_RETRY_INTERVAL
+        ):
+            return
+        self._keepalive_task = self.entry.async_create_background_task(
+            self.hass, self.async_run_keepalive(), name="textnow keep-alive"
+        )
+
+    async def async_note_outbound_use(self) -> None:
+        """Record that the number was just used to send something.
+
+        Anything the user sends counts, so a house that texts every day never
+        triggers a keep-alive of its own.
+        """
+        self._last_outbound = dt_util.utcnow()
+        self._last_outbound_read = True
+        await self.storage.async_set_last_outbound(self._last_outbound.isoformat())
+
+    async def async_run_keepalive(self, *, force: bool = False) -> bool:
+        """Text the safe number if nothing has been sent for long enough.
+
+        TextNow gives an idle number back to the pool, which costs the user
+        their number and every automation pointed at it. Returns True when a
+        message was sent.
+        """
+        phone = self.keepalive_phone
+        if not phone:
+            return False
+
+        now = dt_util.utcnow()
+        if (
+            not force
+            and self._keepalive_checked is not None
+            and now - self._keepalive_checked < KEEPALIVE_RETRY_INTERVAL
+        ):
+            return False
+        self._keepalive_checked = now
+
+        if not self._last_outbound_read:
+            stored = await self.storage.async_get_last_outbound()
+            self._last_outbound = dt_util.parse_datetime(stored) if stored else None
+            self._last_outbound_read = True
+
+        # With nothing recorded there is no way to tell how long the number has
+        # been idle, so one message goes out now and starts the clock.
+        idle_for = None if self._last_outbound is None else now - self._last_outbound
+        if not force and idle_for is not None:
+            if idle_for < timedelta(days=self.keepalive_days):
+                return False
 
         try:
-            # GET /api/users/{username}/messages
-            # Parameters: start_message_id=0&direction=future&page_size=0
-            url = f"{self._base_url}/api/users/{self._username}/messages"
-            params = {
+            await self.send_message(phone, self.keepalive_message)
+        except HomeAssistantError as err:
+            # Retried on the next hourly check; the session problems that cause
+            # this already report themselves through the entry state.
+            _LOGGER.warning("Could not send the TextNow keep-alive message: %s", err)
+            return False
+
+        _LOGGER.info(
+            "Sent a TextNow keep-alive message after %s idle days",
+            "unknown" if idle_for is None else idle_for.days,
+        )
+        return True
+
+    async def async_shutdown(self) -> None:
+        """Release the session on shutdown."""
+        await super().async_shutdown()
+        _async_release_session(self.session)
+        self.session = None
+
+    @callback
+    def _async_pause_polling(self) -> None:
+        """Stop polling a session TextNow has rejected.
+
+        Retrying an expired session every 30 seconds is what turns one
+        authentication failure into thousands of requests a day.
+        """
+        self.auth_failed = True
+        if self.update_interval is not None:
+            self.update_interval = None
+            _LOGGER.debug("Paused TextNow polling until the session is renewed")
+
+    @callback
+    def _async_back_off(self) -> None:
+        """Slow polling down while TextNow keeps failing."""
+        self.auth_failed = False
+        self._failures += 1
+        backoff = min(
+            self.polling_interval * 2**self._failures,
+            int(MAX_BACKOFF_INTERVAL.total_seconds()),
+        )
+        interval = timedelta(seconds=backoff)
+        if self.update_interval != interval:
+            self.update_interval = interval
+            _LOGGER.debug(
+                "TextNow polling backed off to %s s after %s failures",
+                backoff,
+                self._failures,
+            )
+
+    @callback
+    def _async_resume_normal_polling(self) -> None:
+        """Restore the configured interval after a successful poll."""
+        self.auth_failed = False
+        self._failures = 0
+        self.last_success = dt_util.utcnow()
+        interval = timedelta(seconds=self.polling_interval)
+        if self.update_interval != interval:
+            self.update_interval = interval
+        self._async_clear_auth_problem()
+
+    @callback
+    def _async_report_auth_problem(self, err: TextNowAuthError) -> None:
+        """Raise a repair item when Home Assistant's own is not enough.
+
+        Asking for a reauth already puts "Authentication expired" in Repairs
+        with a button that opens the form, so repeating it here would be two
+        cards for one problem. Being turned away by the bot protection needs
+        different steps, which is worth its own card.
+        """
+        if not isinstance(err, TextNowBlockedError):
+            return
+
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            self._auth_issue_id,
+            is_fixable=False,
+            is_persistent=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key=err.issue_key,
+            translation_placeholders={
+                "account": self.entry.title or self.username,
+            },
+            learn_more_url=COOKIE_HELP_URL,
+        )
+
+    @callback
+    def _async_clear_auth_problem(self) -> None:
+        """Remove the repair item once the session works again."""
+        ir.async_delete_issue(self.hass, DOMAIN, self._auth_issue_id)
+
+    @property
+    def _auth_issue_id(self) -> str:
+        """Return the repair issue id for this account."""
+        return f"bot_blocked_{self.entry.entry_id}"
+
+    @callback
+    def _async_get_session(self) -> aiohttp.ClientSession:
+        """Return the session, creating it when needed.
+
+        Cookies are passed per request and the Set-Cookie replies are tracked
+        by hand. aiohttp's jar keeps a host scoped cookie alongside the
+        Domain=.textnow.com one the server sends back and then replays the
+        stale value, which is exactly how a live session gets lost.
+        """
+        if self.session is None or self.session.closed:
+            self.session = async_create_clientsession(
+                self.hass,
+                auto_cleanup=False,
+                cookie_jar=aiohttp.DummyCookieJar(),
+                timeout=REQUEST_TIMEOUT,
+            )
+        return self.session
+
+    @callback
+    def _async_absorb_cookies(self, cookies: SimpleCookie) -> None:
+        """Follow the cookies TextNow rotates during a session."""
+        changed = False
+
+        for name, morsel in cookies.items():
+            value = morsel.value
+            deleted = not value or str(morsel.get("max-age", "")).strip() in {"0", "-1"}
+            if deleted:
+                if self._cookies.pop(name, None) is not None:
+                    changed = True
+            elif self._cookies.get(name) != value:
+                self._cookies[name] = value
+                changed = True
+
+        if changed:
+            self._async_persist_cookies()
+
+    @callback
+    def _async_persist_cookies(self) -> None:
+        """Store rotated cookies so a restart stays signed in.
+
+        The session cookie is written straight away; the tokens that rotate on
+        every call are written occasionally to spare the disk.
+        """
+        login_cookie = self._cookies.get("connect.sid", "")
+        now = dt_util.utcnow()
+
+        if (
+            login_cookie == self.entry.data.get("connect_sid")
+            and self._last_cookie_write is not None
+            and now - self._last_cookie_write < COOKIE_PERSIST_INTERVAL
+        ):
+            return
+
+        self._last_cookie_write = now
+        data = {
+            **self.entry.data,
+            CONF_COOKIES: dict(self._cookies),
+            **{
+                key: self._cookies.get(name, "")
+                for key, name in COOKIE_KEYS.items()
+            },
+        }
+        self.hass.config_entries.async_update_entry(self.entry, data=data)
+        _LOGGER.debug("Saved refreshed TextNow session cookies")
+
+    def _headers_factory(
+        self, extra: dict[str, str] | None = None
+    ) -> Callable[[], dict[str, str]]:
+        """Return a callable building headers from the live cookies."""
+
+        def _factory() -> dict[str, str]:
+            return build_headers(self._cookies, extra)
+
+        return _factory
+
+    async def _async_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, str] | None = None,
+        json_data: Any = None,
+        data: Any = None,
+        extra_headers: dict[str, str] | None = None,
+        timeout: aiohttp.ClientTimeout = REQUEST_TIMEOUT,
+        parse_json: bool = True,
+    ) -> Any:
+        """Run an authenticated request against the TextNow API."""
+        session = self._async_get_session()
+        try:
+            return await async_api_request(
+                session,
+                method,
+                url,
+                headers_factory=self._headers_factory(extra_headers),
+                cookies_factory=lambda: self._cookies,
+                cookie_sink=self._async_absorb_cookies,
+                params=params,
+                json_data=json_data,
+                data=data,
+                timeout=timeout,
+                parse_json=parse_json,
+            )
+        except TextNowAuthError as err:
+            # A service call has no coordinator refresh to report through, so
+            # the reauth flow and the repair item are started here.
+            if self.entry.state is ConfigEntryState.LOADED:
+                self._async_pause_polling()
+                self._async_report_auth_problem(err)
+                self.entry.async_start_reauth(self.hass)
+            raise
+
+    async def _async_upload_attachment(
+        self, upload_url: str, file_data: bytes, content_type: str
+    ) -> None:
+        """Upload a file to the pre-signed attachment URL.
+
+        The upload host is not TextNow, so no session headers are sent and a
+        403 from it means the pre-signed URL went stale, not that the TextNow
+        session expired.
+        """
+        session = self._async_get_session()
+        await async_api_request(
+            session,
+            "PUT",
+            upload_url,
+            headers_factory=lambda: {
+                "Content-Type": content_type,
+                "User-Agent": USER_AGENT,
+            },
+            data=file_data,
+            timeout=UPLOAD_TIMEOUT,
+            parse_json=False,
+            check_auth=False,
+        )
+
+    async def _async_get_upload_url(self, message_type: str) -> str:
+        """Request a pre-signed upload URL for an attachment."""
+        payload = await self._async_request(
+            "GET",
+            f"{BASE_URL}/api/v3/attachment_url",
+            params={"message_type": message_type},
+        )
+        upload_url = payload.get("result") if isinstance(payload, dict) else None
+        if not upload_url:
+            raise TextNowApiError("TextNow did not return an upload URL")
+        return str(upload_url)
+
+    async def _async_send_attachment(self, send_data: dict[str, str]) -> None:
+        """Post an uploaded attachment to a contact."""
+        await self._async_request(
+            "POST",
+            f"{BASE_URL}/api/v3/send_attachment",
+            data=send_data,
+            extra_headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=UPLOAD_TIMEOUT,
+        )
+
+    async def _poll_unread_messages(self) -> None:
+        """Poll for new incoming messages."""
+        if not self.username:
+            raise TextNowApiError("No TextNow username is configured")
+
+        payload = await self._async_request(
+            "GET",
+            f"{BASE_URL}/api/users/{self.username}/messages",
+            params={
                 "start_message_id": "0",
                 "direction": "future",
                 "page_size": "0",
+            },
+        )
+
+        messages = _extract_messages(payload)
+        if not messages:
+            return
+
+        data = await self.storage.async_load()
+        processed = data.get("processed_message_ids") or set()
+        contacts = data.get("contacts", {})
+        # A fresh account adopts the existing history quietly, otherwise
+        # setting up the integration would replay old texts into automations.
+        history_adopted = bool(data.get("history_adopted")) or bool(processed)
+        allowed_phones = self._config.get("allowed_phones") or []
+        phone_to_contact = {
+            contact["phone"]: contact_id
+            for contact_id, contact in contacts.items()
+            if contact.get("phone")
+        }
+
+        new_message_ids: list[str] = []
+
+        for message in messages:
+            # Message structure: id, contact_value, message, message_direction
+            # (1 = incoming, 2 = outgoing)
+            message_id = str(message.get("id", ""))
+            if not message_id or message_id in processed:
+                continue
+            if message.get("message_direction") != 1:
+                continue
+
+            phone = message.get("contact_value", "")
+            if not phone:
+                continue
+
+            new_message_ids.append(message_id)
+            if not history_adopted:
+                continue
+
+            # Security: check allowed phones
+            if allowed_phones and phone not in allowed_phones:
+                _LOGGER.warning("Received message from unauthorized phone: %s", phone)
+                continue
+
+            text = message.get("message", "")
+            timestamp = (
+                message.get("timestamp")
+                or message.get("date")
+                or dt_util.utcnow().isoformat()
+            )
+
+            contact_id = phone_to_contact.get(phone, phone)
+            contact_name = ""
+            if contact_id in contacts:
+                contact_name = contacts[contact_id].get("name", "")
+
+            # Recorded here rather than in the device trigger so that
+            # "reply to sender" also works for YAML triggers and for
+            # automations that listen for the event directly.
+            self.hass.data.setdefault(DOMAIN, {})["last_trigger_contact"] = {
+                "contact_id": contact_id,
+                "contact_name": contact_name,
+                "phone": phone,
+                "entity_id": f"sensor.textnow_{contact_id}" if contact_id else "",
             }
 
-            async with self.session.get(url, params=params) as response:
-                if response.status != 200:
-                    _LOGGER.error(
-                        "Failed to fetch messages: %s %s", response.status, await response.text()
-                    )
-                    return
+            self.hass.bus.async_fire(
+                EVENT_MESSAGE_RECEIVED,
+                {
+                    ATTR_PHONE: phone,
+                    ATTR_TEXT: text,
+                    ATTR_MESSAGE_ID: message_id,
+                    ATTR_TIMESTAMP: timestamp,
+                    ATTR_CONTACT_ID: contact_id,
+                    "contact_name": contact_name,
+                },
+            )
 
-                data = await response.json()
-                # API returns messages in a list or nested structure
-                # Handle different possible response formats
-                if isinstance(data, list):
-                    messages = data
-                elif isinstance(data, dict):
-                    # Try common response wrapper keys
-                    messages = (
-                        data.get("messages", [])
-                        or data.get("data", [])
-                        or data.get("result", [])
-                        or []
-                    )
-                else:
-                    messages = []
+            await self._check_pending_expectations(phone, text, contact_id)
 
-            contacts = await self.storage.async_get_contacts()
-            phone_to_contact = {contact["phone"]: cid for cid, contact in contacts.items()}
-
-            for message in messages:
-                # Message structure: id, contact_value, message, message_direction (1=incoming, 2=outgoing)
-                message_id = str(message.get("id", ""))
-                if not message_id:
-                    continue
-
-                # Only process incoming messages (message_direction == 1)
-                if message.get("message_direction") != 1:
-                    continue
-
-                # Check if already processed
-                if await self.storage.async_is_message_processed(message_id):
-                    continue
-
-                phone = message.get("contact_value", "")
-                if not phone:
-                    continue
-
-                # Security: check allowed phones
-                if self._allowed_phones and phone not in self._allowed_phones:
-                    _LOGGER.warning("Received message from unauthorized phone: %s", phone)
-                    continue
-
-                text = message.get("message", "")
-                # Try to get timestamp from message, fallback to now
-                timestamp = message.get("timestamp") or message.get("date") or dt_util.utcnow().isoformat()
-
-                # Find contact_id and contact_name
-                contact_id = phone_to_contact.get(phone, phone)
-                contact_name = ""
-                if contact_id in contacts:
-                    contact_name = contacts[contact_id].get("name", "")
-
-                # Fire message received event
-                self.hass.bus.async_fire(
-                    EVENT_MESSAGE_RECEIVED,
-                    {
-                        ATTR_PHONE: phone,
-                        ATTR_TEXT: text,
-                        ATTR_MESSAGE_ID: message_id,
-                        ATTR_TIMESTAMP: timestamp,
-                        ATTR_CONTACT_ID: contact_id,
-                        "contact_name": contact_name,
-                    },
+        if new_message_ids or not history_adopted:
+            if not history_adopted:
+                _LOGGER.debug(
+                    "Adopted %s existing TextNow messages without firing events",
+                    len(new_message_ids),
                 )
-
-                # Update last_inbound for contact
-                await self._update_contact_last_inbound(contact_id, timestamp)
-
-                # Check for pending expectations
-                await self._check_pending_expectations(phone, text, contact_id)
-
-                # Mark message as processed
-                await self.storage.async_add_processed_message_id(message_id)
-
-                # Note: TextNow API doesn't have a separate "mark read" endpoint
-                # Messages are considered read after fetching
-
-        except aiohttp.ClientError as e:
-            _LOGGER.error("HTTP error polling messages: %s", e)
-        except Exception as e:
-            _LOGGER.error("Error polling messages: %s", e)
-
+            # One write per poll instead of one per message.
+            await self.storage.async_mark_messages_processed(new_message_ids)
 
     async def _check_pending_expectations(
         self, phone: str, text: str, contact_id: str
@@ -242,7 +873,7 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
                     response_value = str(parsed.get("option_index") + 1)  # 1, 2, 3, etc.
                 else:
                     response_value = str(parsed["value"])
-                
+
                 # Fire reply parsed event with response_variable name if specified
                 event_data = {
                     ATTR_PHONE: phone,
@@ -253,24 +884,19 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
                     ATTR_OPTION_INDEX: parsed.get("option_index"),
                     "response_number": response_value,  # The option number (1, 2, 3, etc.)
                 }
-                
+
                 # Include response_variable name in event if specified
                 response_variable = pending_data.get("response_variable")
                 if response_variable:
                     event_data["response_variable"] = response_variable
-                
+
                 self.hass.bus.async_fire(EVENT_REPLY_PARSED, event_data)
 
                 # Always clear pending after first match (removed keep_pending feature)
                 await self.storage.async_clear_pending(phone, key)
-                
+
                 # Only process first match (one pending per phone)
                 break
-
-    async def _update_contact_last_inbound(self, contact_id: str, timestamp: str) -> None:
-        """Update last inbound timestamp for contact."""
-        # This will be handled by the sensor entity
-        pass
 
     async def _cleanup_expired_pending(self) -> None:
         """Clean up expired pending expectations."""
@@ -294,56 +920,37 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
 
     async def send_message(self, phone: str, message: str) -> None:
         """Send an SMS message."""
-        await self._ensure_session()
-        if self.session is None:
-            raise Exception("Session not initialized")
-
         # POST /api/users/{username}/messages
         # JSON: {"contact_value": "phone", "message_direction": 2, "contact_type": 2, "message": "text"}
-        url = f"{self._base_url}/api/users/{self._username}/messages"
-        payload = {
-            "contact_value": phone,
-            "message_direction": 2,  # 2 = outgoing
-            "contact_type": 2,  # 2 = phone number
-            "message": message,
-        }
+        await self._async_request(
+            "POST",
+            f"{BASE_URL}/api/users/{self.username}/messages",
+            json_data={
+                "contact_value": phone,
+                "message_direction": 2,  # 2 = outgoing
+                "contact_type": 2,  # 2 = phone number
+                "message": message,
+            },
+        )
+        await self.async_note_outbound_use()
+        _LOGGER.debug("Message sent successfully to %s", phone)
 
-        try:
-            async with self.session.post(url, json=payload) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    _LOGGER.error(
-                        "Failed to send message: %s %s", response.status, error_text
-                    )
-                    raise Exception(f"Failed to send message: {response.status}")
-
-                _LOGGER.debug("Message sent successfully to %s", phone)
-
-            # Update last_outbound for contact
-            await self._update_contact_last_outbound_by_phone(phone)
-
-        except aiohttp.ClientError as e:
-            _LOGGER.error("HTTP error sending message: %s", e)
-            raise
-
-    async def send_mms(self, phone: str, message: str, file_data: bytes, filename: str = "image.jpg") -> None:
+    async def send_mms(
+        self, phone: str, message: str, file_data: bytes, filename: str = "image.jpg"
+    ) -> None:
         """Send an MMS message with image/media attachment.
-        
+
         Uses 3-step API process:
         1. GET upload URL from /api/v3/attachment_url?message_type=2
         2. PUT file to pre-signed URL
         3. POST to /api/v3/send_attachment with form data
-        
+
         Args:
             phone: Phone number to send to
             message: Caption text (optional)
             file_data: File data as bytes
             filename: Filename for content type detection (default: "image.jpg")
         """
-        await self._ensure_session()
-        if self.session is None:
-            raise Exception("Session not initialized")
-        
         # Determine content type from file extension
         filename_lower = filename.lower()
         if filename_lower.endswith('.png'):
@@ -352,182 +959,62 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
             content_type = 'image/gif'
         else:
             content_type = 'image/jpeg'  # default for images
-        
-        try:
-            # Step 1: Get upload URL
-            upload_url_response = await self.session.get(
-                f"{self._base_url}/api/v3/attachment_url?message_type=2"
-            )
-            
-            if upload_url_response.status != 200:
-                error_text = await upload_url_response.text()
-                _LOGGER.error(
-                    "Failed to get upload URL: %s %s", upload_url_response.status, error_text
-                )
-                raise Exception(f"Failed to get upload URL: {upload_url_response.status}")
-            
-            upload_data = await upload_url_response.json()
-            pre_signed_url = upload_data.get('result')
-            
-            if not pre_signed_url:
-                _LOGGER.error("No upload URL in response: %s", upload_data)
-                raise Exception("No upload URL in response")
-            
-            # Step 2: Upload file to pre-signed URL
-            upload_response = await self.session.put(
-                pre_signed_url,
-                data=file_data,
-                headers={'Content-Type': content_type}
-            )
-            
-            if upload_response.status != 200:
-                error_text = await upload_response.text()
-                _LOGGER.error(
-                    "Failed to upload file: %s %s", upload_response.status, error_text
-                )
-                raise Exception(f"Failed to upload file: {upload_response.status}")
-            
-            # Step 3: Send message with attachment
-            send_data = {
+
+        upload_url = await self._async_get_upload_url("2")
+        await self._async_upload_attachment(upload_url, file_data, content_type)
+        await self._async_send_attachment(
+            {
                 "contact_value": phone,
                 "contact_type": "2",
-                "attachment_url": pre_signed_url,
+                "attachment_url": upload_url,
                 "message_type": "2",
                 "media_type": "images",
                 "message": message,
             }
-            
-            # Override Content-Type for form data and ensure all headers are present
-            send_response = await self.session.post(
-                f"{self._base_url}/api/v3/send_attachment",
-                data=send_data,
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "X-CSRF-Token": self._get_csrf_header_value(),
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Accept": "application/json, text/plain, */*",
-                    "Referer": f"{self._base_url}/messaging",
-                    "Origin": self._base_url,
-                },
-            )
-            
-            if send_response.status != 200:
-                error_text = await send_response.text()
-                _LOGGER.error(
-                    "Failed to send MMS: %s %s", send_response.status, error_text
-                )
-                _LOGGER.error("Request data was: %s", send_data)
-                raise Exception(f"Failed to send MMS: {send_response.status} - {error_text[:200]}")
-            
-            _LOGGER.debug("MMS sent successfully to %s", phone)
-            await self._update_contact_last_outbound_by_phone(phone)
+        )
 
-        except Exception as e:
-            _LOGGER.error("Error sending MMS: %s", e)
-            raise
-    
+        await self.async_note_outbound_use()
+        _LOGGER.debug("MMS sent successfully to %s", phone)
+
     async def send_voice_message(self, phone: str, file_data: bytes) -> None:
         """Send a voice message with audio file.
-        
+
         Uses 3-step API process:
         1. GET upload URL from /api/v3/attachment_url?message_type=3
         2. PUT audio file to pre-signed URL
         3. POST to /api/v3/send_attachment with form data
-        
+
         Args:
             phone: Phone number to send to
             file_data: Audio file data as bytes
         """
-        await self._ensure_session()
-        if self.session is None:
-            raise Exception("Session not initialized")
-        
-        try:
-            # Step 1: Get upload URL for voice message (message_type=3)
-            upload_url_response = await self.session.get(
-                f"{self._base_url}/api/v3/attachment_url?message_type=3"
-            )
-            
-            if upload_url_response.status != 200:
-                error_text = await upload_url_response.text()
-                _LOGGER.error(
-                    "Failed to get upload URL: %s %s", upload_url_response.status, error_text
-                )
-                raise Exception(f"Failed to get upload URL: {upload_url_response.status}")
-            
-            upload_data = await upload_url_response.json()
-            pre_signed_url = upload_data.get('result')
-            
-            if not pre_signed_url:
-                _LOGGER.error("No upload URL in response: %s", upload_data)
-                raise Exception("No upload URL in response")
-            
-            # Step 2: Upload audio file to pre-signed URL
-            upload_response = await self.session.put(
-                pre_signed_url,
-                data=file_data,
-                headers={'Content-Type': 'audio/mpeg'}
-            )
-            
-            if upload_response.status != 200:
-                error_text = await upload_response.text()
-                _LOGGER.error(
-                    "Failed to upload audio file: %s %s", upload_response.status, error_text
-                )
-                raise Exception(f"Failed to upload audio file: {upload_response.status}")
-            
-            # Step 3: Send voice message
-            send_data = {
+        upload_url = await self._async_get_upload_url("3")
+        await self._async_upload_attachment(upload_url, file_data, "audio/mpeg")
+        await self._async_send_attachment(
+            {
                 "contact_value": phone,
                 "contact_type": "2",
-                "attachment_url": pre_signed_url,
+                "attachment_url": upload_url,
                 "message_type": "3",
                 "media_type": "audio",
                 "message": "",  # Always empty for voice messages
             }
-            
-            # Override Content-Type for form data and ensure all headers are present
-            send_response = await self.session.post(
-                f"{self._base_url}/api/v3/send_attachment",
-                data=send_data,
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "X-CSRF-Token": self._get_csrf_header_value(),
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Accept": "application/json, text/plain, */*",
-                    "Referer": f"{self._base_url}/messaging",
-                    "Origin": self._base_url,
-                },
-            )
-            
-            if send_response.status != 200:
-                error_text = await send_response.text()
-                _LOGGER.error(
-                    "Failed to send voice message: %s %s", send_response.status, error_text
-                )
-                _LOGGER.error("Request data was: %s", send_data)
-                raise Exception(f"Failed to send voice message: {send_response.status} - {error_text[:200]}")
-            
-            _LOGGER.debug("Voice message sent successfully to %s", phone)
-            await self._update_contact_last_outbound_by_phone(phone)
+        )
 
-        except Exception as e:
-            _LOGGER.error("Error sending voice message: %s", e)
-            raise
+        await self.async_note_outbound_use()
+        _LOGGER.debug("Voice message sent successfully to %s", phone)
 
-    async def _update_contact_last_outbound_by_phone(self, phone: str) -> None:
-        """Update last outbound timestamp for contact by phone number."""
-        contacts = await self.storage.async_get_contacts()
-        contact_id = None
-        for cid, contact in contacts.items():
-            if contact["phone"] == phone:
-                contact_id = cid
-                break
-        if contact_id:
-            await self._update_contact_last_outbound(contact_id)
 
-    async def _update_contact_last_outbound(self, contact_id: str) -> None:
-        """Update last outbound timestamp for contact."""
-        # This will be handled by the sensor entity
-        pass
+def _extract_messages(payload: Any) -> list[dict[str, Any]]:
+    """Return the message list from the API payload.
 
+    The API returns either a bare list or a wrapper object.
+    """
+    if isinstance(payload, list):
+        return [message for message in payload if isinstance(message, dict)]
+    if isinstance(payload, dict):
+        for key in ("messages", "data", "result"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [message for message in value if isinstance(message, dict)]
+    return []

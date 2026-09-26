@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<!--
+  Preview of the sidebar panel without Home Assistant.
+
+  Serve this directory over HTTP (ES modules do not load from file://):
+
+      cd tools/panel-preview && python3 -m http.server 8899
+
+  then open http://127.0.0.1:8899/?s=healthy&theme=light
+
+  Query parameters:
+    s=healthy|reauth|offline|multi|empty|nocontacts   which account state to mock
+    theme=light|dark                                  which Home Assistant theme
+    tab=contacts|status|help                          open a tab
+    dialog=send|delete|edit                           open a dialog
+    add=1                                             open the add contact form
+    toast=1                                           show a confirmation snackbar
+    noanim=1                                          freeze entry animations
+
+  The theme variables below are Home Assistant's own defaults. Keep them that
+  way: the header used to be styled against a white --app-header-background-color
+  and turned out to be unreadable in Home Assistant, where that variable is the
+  primary blue.
+
+  Every name and number here is made up. 555-01xx is the range reserved for
+  fiction, so nothing in this file can dial a real phone.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>TextNow panel preview</title>
+    <style>
+      html, body { margin: 0; height: 100%; }
+      body.light {
+        --primary-background-color: #fafafa;
+        --card-background-color: #ffffff;
+        --primary-text-color: #212121;
+        --secondary-text-color: #727272;
+        --divider-color: rgba(0, 0, 0, 0.12);
+        --app-header-background-color: #03a9f4;
+        --app-header-text-color: #ffffff;
+        --ha-card-box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+      }
+      body.dark {
+        --primary-background-color: #111111;
+        --card-background-color: #1c1c1c;
+        --primary-text-color: #e1e1e1;
+        --secondary-text-color: #9b9b9b;
+        --divider-color: rgba(225, 225, 225, 0.12);
+        --app-header-background-color: #101e24;
+        --app-header-text-color: #e1e1e1;
+        --ha-card-box-shadow: none;
+      }
+      textnow-panel { display: block; height: 100vh; }
+    </style>
+  </head>
+  <body class="light">
+    <textnow-panel></textnow-panel>
+    <script type="module">
+      import "../../custom_components/textnow/frontend/textnow-panel.js";
+
+      const params = new URLSearchParams(location.search);
+      const scenario = params.get("s") || "healthy";
+      document.body.className = params.get("theme") || "light";
+
+      const CONTACTS = {
+        e1: [
+          { id: "contact_sam", name: "Sam Rivera", phone: "+15555550142", enabled: true },
+          { id: "contact_mum", name: "Mum", phone: "+15555550177", enabled: true },
+          { id: "contact_garage", name: "Garage Door Bot", phone: "+15555550199", enabled: true },
+          { id: "contact_alex", name: "Alex Chen", phone: "+15555550123", enabled: true },
+        ],
+        e2: [{ id: "contact_work", name: "Work Line", phone: "+15555550188", enabled: true }],
+      };
+
+      const now = new Date();
+      const ago = (seconds) => new Date(now.getTime() - seconds * 1000).toISOString();
+
+      const account = (over) => ({
+        entry_id: "e1",
+        title: "demo_account",
+        account: "demo_account",
+        status: "connected",
+        loaded: true,
+        connected: true,
+        needs_reauth: false,
+        last_error: "",
+        last_success: ago(24),
+        polling_interval: 30,
+        current_interval: 30,
+        keepalive: {
+          phone: "+15555550177",
+          enabled: true,
+          days: 5,
+          last_outbound: ago(2 * 86400),
+          due_at: new Date(now.getTime() + 3 * 86400 * 1000).toISOString(),
+        },
+        ...over,
+      });
+
+      const SCENARIOS = {
+        healthy: [account()],
+        reauth: [
+          account({
+            status: "reauth_required",
+            connected: false,
+            needs_reauth: true,
+            last_error:
+              "TextNow no longer accepts the saved browser session (HTTP 401)",
+            last_success: ago(7300),
+            current_interval: null,
+          }),
+        ],
+        offline: [
+          account({
+            status: "offline",
+            connected: false,
+            last_error: "TextNow did not answer after 3 attempts: ServerTimeoutError",
+            last_success: ago(420),
+            current_interval: 240,
+          }),
+        ],
+        multi: [
+          account({ last_success: ago(12) }),
+          account({
+            entry_id: "e2",
+            title: "work-line",
+            account: "workline",
+            status: "reauth_required",
+            connected: false,
+            needs_reauth: true,
+            last_error: "TextNow's bot protection rejected the request (HTTP 403)",
+            last_success: ago(90000),
+            polling_interval: 60,
+            current_interval: null,
+          }),
+        ],
+        empty: [],
+        nocontacts: [account({ last_success: ago(5) })],
+        nokeepalive: [
+          account({
+            keepalive: { phone: "", enabled: false, days: 5, last_outbound: "", due_at: "" },
+          }),
+        ],
+      };
+
+      const entries = SCENARIOS[scenario] || SCENARIOS.healthy;
+
+      const hass = {
+        async callWS(msg) {
+          if (msg.type === "textnow/get_entries") return entries;
+          if (msg.type === "textnow/contacts_list") {
+            return scenario === "nocontacts" ? [] : CONTACTS[msg.entry_id] || [];
+          }
+          if (msg.type === "textnow/refresh") return { status: "connected" };
+          if (msg.type === "textnow/send_test") return { success: true };
+          if (msg.type === "textnow/keepalive_now") return { success: true };
+          if (msg.type === "textnow/contacts_add") return { id: "contact_new" };
+          return {};
+        },
+      };
+
+      const manifest = await fetch("../../custom_components/textnow/manifest.json")
+        .then((response) => response.json())
+        .catch(() => ({}));
+
+      const el = document.querySelector("textnow-panel");
+      el.panel = {
+        config: { help_url: "https://example.invalid/docs", version: manifest.version },
+      };
+      el.hass = hass;
+
+      // A screenshot of an entry animation catches it at frame zero, which is
+      // fully transparent, so overlays can be frozen on demand.
+      if (params.get("noanim")) {
+        const frozen = document.createElement("style");
+        frozen.textContent = "* { animation: none !important; transition: none !important; }";
+        el.shadowRoot.appendChild(frozen);
+        const render = el._render.bind(el);
+        el._render = function () {
+          render();
+          el.shadowRoot.appendChild(frozen.cloneNode(true));
+        };
+      }
+
+      const problems = [];
+      addEventListener("error", (event) => problems.push(String(event.message)));
+      addEventListener("unhandledrejection", (event) => problems.push(String(event.reason)));
+
+      // The panel loads its data first, so the scene is set up a beat later
+      // and the outcome is put in the title for a headless driver to read.
+      setTimeout(() => {
+        const tab = params.get("tab");
+        const dialog = params.get("dialog");
+        if (tab) el._handle("tab", { tab });
+        if (dialog === "send") el._handle("send-open", { entryId: "e1", contactId: "contact_sam" });
+        if (dialog === "delete") el._handle("delete-open", { entryId: "e1", contactId: "contact_mum" });
+        if (dialog === "edit") el._handle("edit-open", { entryId: "e1", contactId: "contact_sam" });
+        if (params.get("add")) el._handle("toggle-add", { entryId: "e1" });
+        if (params.get("toast")) el._toast("Message sent to Sam Rivera", "ok");
+        document.title = problems.length ? `errors: ${problems.join(" | ")}` : "ready";
+      }, 250);
+    </script>
+  </body>
+</html>

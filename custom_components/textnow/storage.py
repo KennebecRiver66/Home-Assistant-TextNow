@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -10,6 +11,9 @@ from homeassistant.helpers import storage
 from .const import DOMAIN, STORAGE_KEY, STORAGE_VERSION
 
 _LOGGER = logging.getLogger(__name__)
+
+# Keeping every message id forever would grow the store without bound.
+MAX_PROCESSED_MESSAGE_IDS = 1000
 
 
 class TextNowStorage:
@@ -76,6 +80,22 @@ class TextNowStorage:
                     del data["context"][phone]
             await self.async_save(data)
 
+    async def async_get_last_outbound(self) -> str | None:
+        """Return when this account last sent anything, as an ISO string.
+
+        TextNow hands an unused number back to the pool, so the keep-alive
+        needs to know when the number was last used for real.
+        """
+        data = await self.async_load()
+        recorded = data.get("last_outbound_at")
+        return recorded if isinstance(recorded, str) else None
+
+    async def async_set_last_outbound(self, when: str) -> None:
+        """Record when this account last sent something."""
+        data = await self.async_load()
+        data["last_outbound_at"] = when
+        await self.async_save(data)
+
     async def async_get_pending(self, phone: str) -> dict[str, Any]:
         """Get pending expectations for a phone."""
         data = await self.async_load()
@@ -128,9 +148,33 @@ class TextNowStorage:
         data["processed_message_ids"].add(message_id)
         await self.async_save(data)
 
+    async def async_mark_messages_processed(
+        self, message_ids: Iterable[str]
+    ) -> None:
+        """Record processed message IDs with a single write."""
+        data = await self.async_load()
+        processed = set(data.get("processed_message_ids") or set())
+        processed.update(message_ids)
+        data["processed_message_ids"] = _trim_message_ids(processed)
+        # Marks that the existing message history has been seen once, so
+        # future polls only report messages that arrive from now on.
+        data["history_adopted"] = True
+        await self.async_save(data)
+
     async def async_is_message_processed(self, message_id: str) -> bool:
         """Check if a message ID has been processed."""
         data = await self.async_load()
         processed = data.get("processed_message_ids", set())
         return message_id in processed
+
+
+def _trim_message_ids(message_ids: set[str]) -> set[str]:
+    """Keep only the most recent message IDs."""
+    if len(message_ids) <= MAX_PROCESSED_MESSAGE_IDS:
+        return message_ids
+    try:
+        ordered = sorted(message_ids, key=int)
+    except (TypeError, ValueError):
+        ordered = sorted(message_ids)
+    return set(ordered[-MAX_PROCESSED_MESSAGE_IDS:])
 

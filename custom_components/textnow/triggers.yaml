@@ -1,0 +1,35 @@
+message_received:
+  fields:
+    contact_id:
+      example: sam
+      selector:
+        text:
+    phone:
+      example: "5551234567"
+      selector:
+        text:
+
+phrase_received:
+  fields:
+    phrase:
+      required: true
+      example: open the gate
+      selector:
+        text:
+    match_type:
+      default: contains
+      selector:
+        select:
+          options:
+            - contains
+            - exact
+            - starts_with
+            - regex
+    contact_id:
+      example: sam
+      selector:
+        text:
+    phone:
+      example: "5551234567"
+      selector:
+        text:
