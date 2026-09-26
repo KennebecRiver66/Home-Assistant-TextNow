@@ -39,6 +39,13 @@ DEFAULT_TTL_SECONDS: Final = 300  # 5 minutes
 # Upper bound for the backoff applied after repeated polling failures
 MAX_BACKOFF_INTERVAL: Final = timedelta(minutes=15)
 
+# How often to retry once TextNow has rejected the session. Polling has to
+# slow right down -- retrying a dead session every 30 seconds is what turns
+# one failure into thousands of requests a day -- but it must not stop. The
+# poll is the only thing that can notice the session working again, and the
+# only thing that can put the reauth prompt back after it is dismissed.
+AUTH_RECOVERY_INTERVAL: Final = timedelta(minutes=30)
+
 # TextNow gives an unused number back to the pool. The exact idle time is not
 # published and has changed over the years, so the default leaves room under a
 # week rather than sitting on the edge of it.

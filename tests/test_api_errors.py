@@ -13,6 +13,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.textnow import coordinator as coordinator_module
+from custom_components.textnow.const import AUTH_RECOVERY_INTERVAL
 from custom_components.textnow.coordinator import (
     TextNowApiError,
     TextNowAuthError,
@@ -328,8 +329,47 @@ def test_expired_session_asks_home_assistant_for_reauth() -> None:
 
     assert coordinator.auth_failed is True
     assert coordinator.reported == ["TextNowAuthError"]
-    # Polling stops so an expired session cannot make thousands of requests
-    assert coordinator.update_interval is None
+    # Polling slows right down so an expired session cannot make thousands of
+    # requests a day, but it must not stop: see the deadlock test below.
+    assert coordinator.update_interval == AUTH_RECOVERY_INTERVAL
+
+
+def test_an_expired_session_can_recover_without_a_restart() -> None:
+    """The bug that locked an account out until Home Assistant restarted.
+
+    auth_failed was only ever cleared by a poll, and the auth failure set
+    update_interval to None, which stopped every future poll. Pausing removed
+    the one mechanism that could clear the flag, so the panel said "reconnect"
+    for ever and the send controls stayed disabled.
+    """
+    coordinator = _TestableCoordinator(TextNowAuthError("expired"))
+
+    with pytest.raises(ConfigEntryAuthFailed):
+        _run(coordinator._async_update_data())
+    assert coordinator.auth_failed is True
+
+    # Home Assistant can only schedule another poll if an interval survives.
+    assert coordinator.update_interval is not None
+
+    # That next poll is what notices the session working again.
+    coordinator._failure = None
+    _run(coordinator._async_update_data())
+
+    assert coordinator.auth_failed is False
+    assert coordinator.update_interval.total_seconds() == 30
+
+
+def test_the_refresh_button_re_arms_a_slowed_account() -> None:
+    """The panel's refresh must not leave the account on the slow interval."""
+    coordinator = _TestableCoordinator(TextNowAuthError("expired"))
+
+    with pytest.raises(ConfigEntryAuthFailed):
+        _run(coordinator._async_update_data())
+
+    coordinator.async_rearm_polling()
+
+    assert coordinator.auth_failed is False
+    assert coordinator.update_interval.total_seconds() == 30
 
 
 def test_only_the_bot_block_gets_a_repair_card_of_its_own(monkeypatch) -> None:

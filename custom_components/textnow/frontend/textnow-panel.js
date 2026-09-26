@@ -461,6 +461,21 @@ class TextNowPanel extends HTMLElement {
     this._render();
   }
 
+  /**
+   * Ask Home Assistant to open the sign-in form, then go to where it shows.
+   *
+   * Sending the user to the integrations page on its own only works when a
+   * prompt happens to be open there already.
+   */
+  async _startReauth(entryId) {
+    try {
+      await this._hass.callWS({ type: "textnow/start_reauth", entry_id: entryId });
+    } catch (err) {
+      console.error("TextNow: could not start the sign-in", err);
+    }
+    window.location.assign(INTEGRATION_PAGE);
+  }
+
   async _sendKeepalive(entryId) {
     const entry = this._entries.find((item) => item.entry_id === entryId);
     const phone = entry && entry.keepalive ? formatPhone(entry.keepalive.phone) : "";
@@ -852,7 +867,10 @@ class TextNowPanel extends HTMLElement {
 
   _contactRow(entry, contact) {
     const hue = avatarHue(contact.id || contact.name || "");
-    const canSend = this._statusOf(entry) === "connected";
+    // Gated on the account running, not on the reported status. A status can
+    // be stale, and disabling a control that would have worked is worse than
+    // letting the send fail with the real reason.
+    const canSend = entry.loaded !== false;
     return `
       <li class="item">
         <span class="avatar" style="background: hsl(${hue} 52% 42%)" aria-hidden="true">
@@ -867,7 +885,7 @@ class TextNowPanel extends HTMLElement {
         <div class="item-actions">
           <button class="btn sm" data-act="send-open" data-entry="${esc(entry.entry_id)}"
             data-contact="${esc(contact.id)}" ${canSend ? "" : "disabled"}
-            title="${canSend ? "Send a message" : "Available once the connection is working"}">
+            title="${canSend ? "Send a message" : "Available once this account is running"}">
             ${svg(ICON.send, 18)}<span class="hide-narrow">Message</span>
           </button>
           <button class="icon-btn" data-act="edit-open" data-entry="${esc(entry.entry_id)}"
@@ -1298,6 +1316,8 @@ class TextNowPanel extends HTMLElement {
         this._sendKeepalive(entryId);
         break;
       case "fix":
+        this._startReauth(entryId);
+        break;
       case "settings":
         window.location.assign(INTEGRATION_PAGE);
         break;
