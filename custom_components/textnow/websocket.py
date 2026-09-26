@@ -11,7 +11,14 @@ from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry, ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 
-from .const import CONF_POLLING_INTERVAL, CONF_USERNAME, DOMAIN
+from .const import (
+    CONF_KEEPALIVE_DAYS,
+    CONF_KEEPALIVE_PHONE,
+    CONF_POLLING_INTERVAL,
+    CONF_USERNAME,
+    DEFAULT_KEEPALIVE_DAYS,
+    DOMAIN,
+)
 from .phone_utils import format_phone_number
 from .storage import TextNowStorage
 
@@ -28,6 +35,7 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_contacts_delete)
     websocket_api.async_register_command(hass, websocket_send_test)
     websocket_api.async_register_command(hass, websocket_refresh)
+    websocket_api.async_register_command(hass, websocket_keepalive_now)
 
 
 STATUS_CONNECTED = "connected"
@@ -58,6 +66,24 @@ def _entry_status(hass: HomeAssistant, entry: ConfigEntry, coordinator: Any) -> 
     if not coordinator.last_update_success:
         return STATUS_OFFLINE
     return STATUS_CONNECTED
+
+
+def _keepalive_state(entry: ConfigEntry, coordinator: Any) -> dict[str, Any]:
+    """Describe the keep-alive for the panel.
+
+    Read from the entry rather than the coordinator so it is still reported
+    while the account waits to be signed in again.
+    """
+    phone = str(entry.data.get(CONF_KEEPALIVE_PHONE) or "")
+    last_outbound = getattr(coordinator, "last_outbound", None)
+    due_at = getattr(coordinator, "keepalive_due_at", None)
+    return {
+        "phone": phone,
+        "enabled": bool(phone),
+        "days": int(entry.data.get(CONF_KEEPALIVE_DAYS) or DEFAULT_KEEPALIVE_DAYS),
+        "last_outbound": last_outbound.isoformat() if last_outbound else "",
+        "due_at": due_at.isoformat() if due_at else "",
+    }
 
 
 @websocket_api.websocket_command(
@@ -96,6 +122,7 @@ async def websocket_get_entries(
                 "current_interval": (
                     int(interval.total_seconds()) if interval else None
                 ),
+                "keepalive": _keepalive_state(entry, coordinator),
             }
         )
 
@@ -138,6 +165,58 @@ async def websocket_refresh(
                 str(coordinator.last_exception) if coordinator.last_exception else ""
             ),
         },
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        "type": "textnow/keepalive_now",
+        vol.Required("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_keepalive_now(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Send the keep-alive message now instead of waiting for it to be due."""
+    entry_id = msg["entry_id"]
+
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if not entry or entry.domain != DOMAIN:
+        connection.send_error(msg["id"], "not_found", "Config entry not found")
+        return
+
+    coordinator = hass.data.get(DOMAIN, {}).get(entry_id)
+    if coordinator is None:
+        connection.send_error(
+            msg["id"], "not_loaded", "This account is not currently loaded"
+        )
+        return
+
+    if not coordinator.keepalive_phone:
+        connection.send_error(
+            msg["id"], "not_configured", "No keep-alive number has been set"
+        )
+        return
+
+    try:
+        await coordinator.send_message(
+            coordinator.keepalive_phone, coordinator.keepalive_message
+        )
+    except HomeAssistantError as err:
+        connection.send_error(msg["id"], "send_failed", str(err))
+        return
+    except Exception:
+        _LOGGER.exception("Unexpected error sending the TextNow keep-alive message")
+        connection.send_error(
+            msg["id"],
+            "send_failed",
+            "Something went wrong while sending. Check the Home Assistant log.",
+        )
+        return
+
+    connection.send_result(
+        msg["id"], {"success": True, "phone": coordinator.keepalive_phone}
     )
 
 

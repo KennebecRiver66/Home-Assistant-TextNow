@@ -7,12 +7,21 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_COOKIES, CONF_POLLING_INTERVAL, CONF_USERNAME, DOMAIN
+from .const import (
+    CONF_COOKIES,
+    CONF_KEEPALIVE_MESSAGE,
+    CONF_KEEPALIVE_PHONE,
+    CONF_POLLING_INTERVAL,
+    CONF_USERNAME,
+    DOMAIN,
+)
 from .coordinator import TextNowDataUpdateCoordinator
 from .storage import TextNowStorage
 
 TO_REDACT = {
     CONF_COOKIES,
+    CONF_KEEPALIVE_MESSAGE,
+    CONF_KEEPALIVE_PHONE,
     CONF_USERNAME,
     "allowed_phones",
     "connect_sid",
@@ -67,5 +76,11 @@ async def async_get_config_entry_diagnostics(
         ),
         "last_error_type": type(last_error).__name__ if last_error else None,
         "last_error": str(last_error) if last_error else None,
+        "keepalive": {
+            "enabled": bool(coordinator.keepalive_phone),
+            "days": coordinator.keepalive_days,
+            "last_outbound": coordinator.last_outbound,
+            "due_at": coordinator.keepalive_due_at,
+        },
     }
     return diagnostics

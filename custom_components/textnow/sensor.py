@@ -152,6 +152,11 @@ class TextNowStatusSensor(TextNowEntity, SensorEntity):
                 else None
             ),
             "last_error": str(last_error) if last_error else None,
+            # Named apart from the contact sensors' last_outbound, which is the
+            # status of one message rather than a time for the whole account.
+            "last_message_sent": self.coordinator.last_outbound,
+            "keepalive_phone": self.coordinator.keepalive_phone or None,
+            "keepalive_due": self.coordinator.keepalive_due_at,
         }
 
 
