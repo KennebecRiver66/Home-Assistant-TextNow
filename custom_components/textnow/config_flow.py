@@ -33,7 +33,7 @@ from .coordinator import (
     async_validate_session,
 )
 from .storage import TextNowStorage
-from .phone_utils import format_phone_number
+from .phone_utils import format_phone_number, readable_phone_number
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -450,7 +450,8 @@ class TextNowOptionsFlowHandler(config_entries.OptionsFlow):
 
         if contacts:
             contacts_text = "\n".join(
-                f"- {data.get('name', 'Unknown')} ({data.get('phone', '')})"
+                f"- {data.get('name', 'Unknown')} "
+                f"({readable_phone_number(data.get('phone', ''))})"
                 for data in contacts.values()
             )
         else:
@@ -548,7 +549,10 @@ class TextNowOptionsFlowHandler(config_entries.OptionsFlow):
             options = [
                 selector.SelectOptionDict(
                     value=contact_id,
-                    label=f"{data.get('name', 'Unknown')} ({data.get('phone', '')})",
+                    label=(
+                        f"{data.get('name', 'Unknown')} "
+                        f"({readable_phone_number(data.get('phone', ''))})"
+                    ),
                 )
                 for contact_id, data in contacts.items()
             ]

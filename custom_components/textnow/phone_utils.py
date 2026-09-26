@@ -34,6 +34,20 @@ def format_phone_number(phone: str) -> str:
     return f"+1{digits}"
 
 
+def readable_phone_number(phone: str) -> str:
+    """Return a number the way a person writes it: (555) 123-4567.
+
+    Storage keeps +1XXXXXXXXXX because that is what TextNow expects, which is
+    not what anyone wants to read in a list of their own contacts.
+    """
+    digits = _phone_pattern.sub("", phone or "")
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) != 10:
+        return phone or ""
+    return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+
+
 def validate_phone_number(phone: str) -> bool:
     """Validate phone number format.
     
