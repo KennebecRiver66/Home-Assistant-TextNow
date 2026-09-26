@@ -442,7 +442,14 @@ class TextNowPanel extends HTMLElement {
     if (sent) {
       delete this._draft["send:text"];
       this._closeDialog();
+      return;
     }
+
+    // A send fails for a reason the status should now be showing, such as a
+    // session TextNow has just refused, so pick that up rather than leaving
+    // the panel claiming everything is fine.
+    await this._fetchEntries();
+    this._render();
   }
 
   async _checkNow(entryId) {
