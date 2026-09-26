@@ -159,8 +159,18 @@ async def websocket_refresh(
 
     coordinator = hass.data.get(DOMAIN, {}).get(entry_id)
     if coordinator is None:
-        connection.send_error(
-            msg["id"], "not_loaded", "This account is not currently loaded"
+        # An expired session stops the entry loading at all, so there is no
+        # coordinator to refresh. Retrying the setup is what this button means
+        # in that state: if the session works again the account comes back, and
+        # if it does not, Home Assistant re-offers the sign-in prompt.
+        await hass.config_entries.async_reload(entry_id)
+        coordinator = hass.data.get(DOMAIN, {}).get(entry_id)
+        connection.send_result(
+            msg["id"],
+            {
+                "status": _entry_status(hass, entry, coordinator),
+                "last_error": str(entry.reason or ""),
+            },
         )
         return
 
@@ -485,7 +495,12 @@ async def websocket_send_test(
     
     # Get coordinator
     if DOMAIN not in hass.data or entry_id not in hass.data[DOMAIN]:
-        connection.send_error(msg["id"], "not_loaded", "Integration not loaded")
+        connection.send_error(
+            msg["id"],
+            "not_loaded",
+            "This account is waiting to be signed in again, so nothing can be "
+            "sent from it yet",
+        )
         return
     
     coordinator = hass.data[DOMAIN][entry_id]

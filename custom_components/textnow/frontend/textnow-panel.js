@@ -926,7 +926,13 @@ class TextNowPanel extends HTMLElement {
       ["Contacts", plural(contacts, "contact")],
       [
         "Checks for messages",
-        status === "reauth_required" ? "paused until you sign in again" : everyPhrase(interval),
+        // Checking is slowed right down while the session is refused, not
+        // stopped: those slow checks are what notice it working again.
+        status === "reauth_required"
+          ? entry.loaded === false
+            ? "waiting for you to sign in again"
+            : `${everyPhrase(interval)} until you sign in again`
+          : everyPhrase(interval),
       ],
       ["Last successful check", relativeTime(entry.last_success)],
     ];
@@ -2014,4 +2020,10 @@ class TextNowPanel extends HTMLElement {
   }
 }
 
-customElements.define("textnow-panel", TextNowPanel);
+// After an update the panel is served from a new URL, so a page left open
+// across the restart imports this module a second time. Defining the element
+// twice throws, and the error lands in the Home Assistant log looking like an
+// integration fault.
+if (!customElements.get("textnow-panel")) {
+  customElements.define("textnow-panel", TextNowPanel);
+}
