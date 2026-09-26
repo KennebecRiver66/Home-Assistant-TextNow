@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect your TextNow account",
-        "description": "Home Assistant needs the cookies from a browser that is signed in to TextNow. The quickest way, with no header hunting:\n\n1. Sign in to [textnow.com](https://www.textnow.com) in a desktop browser (Chrome, Edge or Firefox).\n2. Press **F12** to open developer tools and pick the **Network** tab.\n3. Reload the page, then type `messages` in the filter box.\n4. Right-click the first row and choose **Copy → Copy as cURL**.\n5. Paste it in the **Cookies** box below and leave **Username** empty — both are read from the paste.\n\nA plain cookie line works too: in the same row, look under *Request headers* for **cookie** and copy the whole line. In that case fill in the username from **Settings → Account** on textnow.com.\n\n[Instructions with screenshots]({help_url})",
+        "description": "Home Assistant needs the cookies from a browser that is signed in to TextNow. The quickest way, with no header hunting:\n\n1. Sign in to [textnow.com]({textnow_url}) in a desktop browser (Chrome, Edge or Firefox).\n2. Press **F12** to open developer tools and pick the **Network** tab.\n3. Reload the page, then type `messages` in the filter box.\n4. Right-click the first row and choose **Copy → Copy as cURL**.\n5. Paste it in the **Cookies** box below and leave **Username** empty — both are read from the paste.\n\nA plain cookie line works too: in the same row, look under *Request headers* for **cookie** and copy the whole line. In that case fill in the username from **Settings → Account** on textnow.com.\n\n[Instructions with screenshots]({help_url})",
         "data": {
           "username": "Username (optional)",
           "cookie_string": "Cookies"
@@ -15,7 +15,7 @@
       },
       "reauth_confirm": {
         "title": "TextNow needs new cookies",
-        "description": "The saved browser session for **{username}** is no longer accepted. TextNow signs sessions out after a while, so this is expected rather than a fault. Your contacts, sensors and automations are kept.\n\nHome Assistant needs the cookies from a browser that is signed in to TextNow. The quickest way, with no header hunting:\n\n1. Sign in to [textnow.com](https://www.textnow.com) in a desktop browser (Chrome, Edge or Firefox).\n2. Press **F12** to open developer tools and pick the **Network** tab.\n3. Reload the page, then type `messages` in the filter box.\n4. Right-click the first row and choose **Copy → Copy as cURL**.\n5. Paste it in the **Cookies** box below and leave **Username** empty — both are read from the paste.\n\nA plain cookie line works too: in the same row, look under *Request headers* for **cookie** and copy the whole line. In that case fill in the username from **Settings → Account** on textnow.com.\n\n[Instructions with screenshots]({help_url})",
+        "description": "The saved browser session for **{username}** is no longer accepted. TextNow signs sessions out after a while, so this is expected rather than a fault. Your contacts, sensors and automations are kept.\n\nHome Assistant needs the cookies from a browser that is signed in to TextNow. The quickest way, with no header hunting:\n\n1. Sign in to [textnow.com]({textnow_url}) in a desktop browser (Chrome, Edge or Firefox).\n2. Press **F12** to open developer tools and pick the **Network** tab.\n3. Reload the page, then type `messages` in the filter box.\n4. Right-click the first row and choose **Copy → Copy as cURL**.\n5. Paste it in the **Cookies** box below and leave **Username** empty — both are read from the paste.\n\nA plain cookie line works too: in the same row, look under *Request headers* for **cookie** and copy the whole line. In that case fill in the username from **Settings → Account** on textnow.com.\n\n[Instructions with screenshots]({help_url})",
         "data": {
           "username": "Username (optional)",
           "cookie_string": "Cookies"
@@ -32,7 +32,7 @@
       "connect_sid_missing": "The paste has no connect.sid cookie, which is the one that carries the sign-in session. Copy the cookie line again while signed in to TextNow.",
       "csrf_missing": "The paste has neither the _csrf nor the XSRF-TOKEN cookie. Copy the whole cookie line, not just part of it.",
       "invalid_auth": "TextNow rejected these credentials. The cookies may already have expired, or the username may not match the account they belong to.",
-      "cannot_connect": "Could not reach www.textnow.com. Check the internet connection and try again.",
+      "cannot_connect": "Could not reach TextNow. Check the internet connection and try again.",
       "unexpected_response": "TextNow replied with something unexpected. See the Home Assistant log for the details.",
       "invalid_phone": "Phone number must be exactly 10 digits",
       "unknown": "Unexpected error. See the Home Assistant log for the details."
@@ -54,7 +54,7 @@
       },
       "account": {
         "title": "Account settings",
-        "description": "Paste a fresh cookie line whenever TextNow signs the session out, and choose how often Home Assistant checks for new messages.\n\nHome Assistant needs the cookies from a browser that is signed in to TextNow. The quickest way, with no header hunting:\n\n1. Sign in to [textnow.com](https://www.textnow.com) in a desktop browser (Chrome, Edge or Firefox).\n2. Press **F12** to open developer tools and pick the **Network** tab.\n3. Reload the page, then type `messages` in the filter box.\n4. Right-click the first row and choose **Copy → Copy as cURL**.\n5. Paste it in the **Cookies** box below and leave **Username** empty — both are read from the paste.\n\nA plain cookie line works too: in the same row, look under *Request headers* for **cookie** and copy the whole line. In that case fill in the username from **Settings → Account** on textnow.com.\n\n[Instructions with screenshots]({help_url})",
+        "description": "Paste a fresh cookie line whenever TextNow signs the session out, and choose how often Home Assistant checks for new messages.\n\nHome Assistant needs the cookies from a browser that is signed in to TextNow. The quickest way, with no header hunting:\n\n1. Sign in to [textnow.com]({textnow_url}) in a desktop browser (Chrome, Edge or Firefox).\n2. Press **F12** to open developer tools and pick the **Network** tab.\n3. Reload the page, then type `messages` in the filter box.\n4. Right-click the first row and choose **Copy → Copy as cURL**.\n5. Paste it in the **Cookies** box below and leave **Username** empty — both are read from the paste.\n\nA plain cookie line works too: in the same row, look under *Request headers* for **cookie** and copy the whole line. In that case fill in the username from **Settings → Account** on textnow.com.\n\n[Instructions with screenshots]({help_url})",
         "data": {
           "username": "Username (optional)",
           "cookie_string": "Cookies",
@@ -110,7 +110,7 @@
       "connect_sid_missing": "The paste has no connect.sid cookie, which is the one that carries the sign-in session. Copy the cookie line again while signed in to TextNow.",
       "csrf_missing": "The paste has neither the _csrf nor the XSRF-TOKEN cookie. Copy the whole cookie line, not just part of it.",
       "invalid_auth": "TextNow rejected these credentials. The cookies may already have expired, or the username may not match the account they belong to.",
-      "cannot_connect": "Could not reach www.textnow.com. Check the internet connection and try again.",
+      "cannot_connect": "Could not reach TextNow. Check the internet connection and try again.",
       "unexpected_response": "TextNow replied with something unexpected. See the Home Assistant log for the details.",
       "invalid_phone": "Phone number must be exactly 10 digits",
       "unknown": "Unexpected error. See the Home Assistant log for the details."
@@ -138,6 +138,44 @@
           "connected": "Connected",
           "disconnected": "Disconnected",
           "reauth_required": "New cookies needed"
+        }
+      }
+    }
+  },
+  "triggers": {
+    "message_received": {
+      "name": "Message received",
+      "description": "Triggers when a TextNow message arrives.",
+      "fields": {
+        "contact_id": {
+          "name": "Contact",
+          "description": "Only trigger for this contact. Leave empty for any contact."
+        },
+        "phone": {
+          "name": "Phone number",
+          "description": "Only trigger for this phone number. Leave empty for any number."
+        }
+      }
+    },
+    "phrase_received": {
+      "name": "Phrase received",
+      "description": "Triggers when an incoming TextNow message matches a phrase.",
+      "fields": {
+        "phrase": {
+          "name": "Phrase",
+          "description": "The phrase to look for in the message."
+        },
+        "match_type": {
+          "name": "Match type",
+          "description": "How the phrase is compared with the message."
+        },
+        "contact_id": {
+          "name": "Contact",
+          "description": "Only trigger for this contact. Leave empty for any contact."
+        },
+        "phone": {
+          "name": "Phone number",
+          "description": "Only trigger for this phone number. Leave empty for any number."
         }
       }
     }

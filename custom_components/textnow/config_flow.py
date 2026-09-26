@@ -25,6 +25,7 @@ from .const import (
     MIN_POLLING_INTERVAL,
 )
 from .coordinator import (
+    BASE_URL,
     COOKIE_KEYS,
     TextNowApiError,
     TextNowAuthError,
@@ -172,6 +173,14 @@ def extract_username(text: str) -> str:
     return ""
 
 
+def form_placeholders(**extra: str) -> dict[str, str]:
+    """Return the links used by the cookie instructions.
+
+    Translation strings may not contain URLs, so they arrive as placeholders.
+    """
+    return {"help_url": COOKIE_HELP_URL, "textnow_url": BASE_URL, **extra}
+
+
 def credentials_schema(*, include_polling_interval: bool = False) -> vol.Schema:
     """Return the schema used to ask for account credentials."""
     fields: dict[Any, Any] = {
@@ -285,7 +294,7 @@ class TextNowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 credentials_schema(), user_input or {}
             ),
             errors=errors,
-            description_placeholders={"help_url": COOKIE_HELP_URL},
+            description_placeholders=form_placeholders(),
         )
 
     async def async_step_reauth(
@@ -328,10 +337,7 @@ class TextNowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 user_input or {CONF_USERNAME: stored_username},
             ),
             errors=errors,
-            description_placeholders={
-                "username": stored_username,
-                "help_url": COOKIE_HELP_URL,
-            },
+            description_placeholders=form_placeholders(username=stored_username),
         )
 
     @staticmethod
@@ -427,7 +433,7 @@ class TextNowOptionsFlowHandler(config_entries.OptionsFlow):
                 credentials_schema(include_polling_interval=True), suggested
             ),
             errors=errors,
-            description_placeholders={"help_url": COOKIE_HELP_URL},
+            description_placeholders=form_placeholders(),
         )
 
     def _reconstruct_cookie_string(self) -> str:
