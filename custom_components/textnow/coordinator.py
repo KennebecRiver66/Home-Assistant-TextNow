@@ -58,6 +58,7 @@ from .cookies import (
     sanitize_cookies,
 )
 from .parsing import parse_reply
+from .reauth import async_clear_reauth_flows
 from .storage import TextNowStorage
 
 _LOGGER = logging.getLogger(__name__)
@@ -533,6 +534,11 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
         self._last_outbound = dt_util.utcnow()
         self._last_outbound_read = True
         await self.storage.async_set_last_outbound(self._last_outbound.isoformat())
+        # A message TextNow accepted proves the session works more directly
+        # than a poll does, so anything still asking the user to sign in is
+        # asking about a problem that is over.
+        self.auth_failed = False
+        async_clear_reauth_flows(self.hass, self.entry)
 
     async def async_run_keepalive(self, *, force: bool = False) -> bool:
         """Text the safe number if nothing has been sent for long enough.
@@ -653,6 +659,11 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
         if self.update_interval != interval:
             self.update_interval = interval
         self._async_clear_auth_problem()
+        # Home Assistant drops a pending sign-in prompt when an entry sets up
+        # successfully, but not when a later poll succeeds, which is how this
+        # integration actually recovers. Left standing, the prompt outlives
+        # the problem it was asking about.
+        async_clear_reauth_flows(self.hass, self.entry)
 
     @callback
     def _async_report_auth_problem(self, err: TextNowAuthError) -> None:

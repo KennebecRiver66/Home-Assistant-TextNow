@@ -25,6 +25,7 @@ from custom_components.textnow.coordinator import (
     async_api_request,
 )
 from custom_components.textnow.storage import _trim_message_ids
+from fakes import FakeHass
 
 PERIMETERX_BODY = (
     "<html><head><title>Access to this page has been denied</title>"
@@ -305,7 +306,7 @@ def test_processed_ids_are_trimmed_to_the_newest() -> None:
 
 
 class _TestableCoordinator(TextNowDataUpdateCoordinator):
-    """Coordinator without a Home Assistant instance behind it."""
+    """Coordinator with only the Home Assistant pieces it really touches."""
 
     def __init__(self, failure: Exception | None) -> None:
         self.auth_failed = False
@@ -317,8 +318,10 @@ class _TestableCoordinator(TextNowDataUpdateCoordinator):
         self.reported: list[str] = []
         self.saved = 0
         self.update_interval = None
+        self.hass = FakeHass()
+        self.entry = self.hass.make_entry()
 
-    def _async_persist_cookies(self) -> None:
+    def _async_persist_cookies(self, force: bool = False) -> None:
         self.saved += 1
 
     async def _poll_unread_messages(self) -> None:

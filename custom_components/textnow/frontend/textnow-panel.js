@@ -480,7 +480,15 @@ class TextNowPanel extends HTMLElement {
     try {
       await this._hass.callWS({ type: "textnow/start_reauth", entry_id: entryId });
     } catch (err) {
+      // Sending the user to a page with no form on it would look like the
+      // button did nothing, which is the failure this button had to begin
+      // with. Say what happened and stay put.
       console.error("TextNow: could not start the sign-in", err);
+      this._toast(
+        (err && err.message) || "Could not open the sign-in form",
+        "warn"
+      );
+      return;
     }
     window.location.assign(INTEGRATION_PAGE);
   }
