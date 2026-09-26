@@ -34,11 +34,19 @@ from .const import (
     ATTR_RAW_TEXT,
     ATTR_OPTION_INDEX,
     CONF_COOKIES,
+    CONF_KEEPALIVE_DAYS,
+    CONF_KEEPALIVE_MESSAGE,
+    CONF_KEEPALIVE_PHONE,
     CONF_POLLING_INTERVAL,
     CONF_USERNAME,
     COOKIE_HELP_URL,
+    DEFAULT_KEEPALIVE_DAYS,
+    DEFAULT_KEEPALIVE_MESSAGE,
     DEFAULT_POLLING_INTERVAL,
+    KEEPALIVE_RETRY_INTERVAL,
     MAX_BACKOFF_INTERVAL,
+    MAX_KEEPALIVE_DAYS,
+    MIN_KEEPALIVE_DAYS,
     MIN_POLLING_INTERVAL,
 )
 from .parsing import parse_reply
@@ -348,6 +356,10 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
         self._cookies: dict[str, str] = cookies_from_entry_data(entry.data)
         self._last_cookie_write: datetime | None = None
         self._failures = 0
+        self._last_outbound: datetime | None = None
+        self._last_outbound_read = False
+        self._keepalive_checked: datetime | None = None
+        self._keepalive_task: asyncio.Task[bool] | None = None
 
         super().__init__(
             hass,
@@ -372,6 +384,40 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
             interval = DEFAULT_POLLING_INTERVAL
         return max(MIN_POLLING_INTERVAL, interval)
 
+    @property
+    def keepalive_phone(self) -> str:
+        """Return the number the keep-alive texts, or "" when it is off."""
+        return str(self._config.get(CONF_KEEPALIVE_PHONE) or "")
+
+    @property
+    def keepalive_days(self) -> int:
+        """Return how many idle days may pass before a keep-alive is sent."""
+        try:
+            days = int(self._config.get(CONF_KEEPALIVE_DAYS) or DEFAULT_KEEPALIVE_DAYS)
+        except (TypeError, ValueError):
+            days = DEFAULT_KEEPALIVE_DAYS
+        return min(MAX_KEEPALIVE_DAYS, max(MIN_KEEPALIVE_DAYS, days))
+
+    @property
+    def keepalive_message(self) -> str:
+        """Return the text the keep-alive sends."""
+        return (
+            str(self._config.get(CONF_KEEPALIVE_MESSAGE) or "").strip()
+            or DEFAULT_KEEPALIVE_MESSAGE
+        )
+
+    @property
+    def last_outbound(self) -> datetime | None:
+        """Return when this account last sent anything."""
+        return self._last_outbound
+
+    @property
+    def keepalive_due_at(self) -> datetime | None:
+        """Return when the next keep-alive would be sent, if it is on."""
+        if not self.keepalive_phone or self._last_outbound is None:
+            return None
+        return self._last_outbound + timedelta(days=self.keepalive_days)
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from TextNow."""
         try:
@@ -386,7 +432,79 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(str(err)) from err
 
         self._async_resume_normal_polling()
+        self._async_schedule_keepalive()
         return {}
+
+    @callback
+    def _async_schedule_keepalive(self) -> None:
+        """Check the keep-alive without holding up the poll.
+
+        Sending is a round trip to TextNow, and this runs off the back of
+        every poll, including the one that sets the entry up.
+        """
+        if not self.keepalive_phone:
+            return
+        if self._keepalive_task is not None and not self._keepalive_task.done():
+            return
+        self._keepalive_task = self.entry.async_create_background_task(
+            self.hass, self.async_run_keepalive(), name="textnow keep-alive"
+        )
+
+    async def async_note_outbound_use(self) -> None:
+        """Record that the number was just used to send something.
+
+        Anything the user sends counts, so a house that texts every day never
+        triggers a keep-alive of its own.
+        """
+        self._last_outbound = dt_util.utcnow()
+        self._last_outbound_read = True
+        await self.storage.async_set_last_outbound(self._last_outbound.isoformat())
+
+    async def async_run_keepalive(self, *, force: bool = False) -> bool:
+        """Text the safe number if nothing has been sent for long enough.
+
+        TextNow gives an idle number back to the pool, which costs the user
+        their number and every automation pointed at it. Returns True when a
+        message was sent.
+        """
+        phone = self.keepalive_phone
+        if not phone:
+            return False
+
+        now = dt_util.utcnow()
+        if (
+            not force
+            and self._keepalive_checked is not None
+            and now - self._keepalive_checked < KEEPALIVE_RETRY_INTERVAL
+        ):
+            return False
+        self._keepalive_checked = now
+
+        if not self._last_outbound_read:
+            stored = await self.storage.async_get_last_outbound()
+            self._last_outbound = dt_util.parse_datetime(stored) if stored else None
+            self._last_outbound_read = True
+
+        # With nothing recorded there is no way to tell how long the number has
+        # been idle, so one message goes out now and starts the clock.
+        idle_for = None if self._last_outbound is None else now - self._last_outbound
+        if not force and idle_for is not None:
+            if idle_for < timedelta(days=self.keepalive_days):
+                return False
+
+        try:
+            await self.send_message(phone, self.keepalive_message)
+        except HomeAssistantError as err:
+            # Retried on the next hourly check; the session problems that cause
+            # this already report themselves through the entry state.
+            _LOGGER.warning("Could not send the TextNow keep-alive message: %s", err)
+            return False
+
+        _LOGGER.info(
+            "Sent a TextNow keep-alive message after %s idle days",
+            "unknown" if idle_for is None else idle_for.days,
+        )
+        return True
 
     async def async_shutdown(self) -> None:
         """Release the session on shutdown."""
@@ -809,6 +927,7 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
                 "message": message,
             },
         )
+        await self.async_note_outbound_use()
         _LOGGER.debug("Message sent successfully to %s", phone)
 
     async def send_mms(
@@ -849,6 +968,7 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
             }
         )
 
+        await self.async_note_outbound_use()
         _LOGGER.debug("MMS sent successfully to %s", phone)
 
     async def send_voice_message(self, phone: str, file_data: bytes) -> None:
@@ -876,6 +996,7 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
             }
         )
 
+        await self.async_note_outbound_use()
         _LOGGER.debug("Voice message sent successfully to %s", phone)
 
 

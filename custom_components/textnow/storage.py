@@ -80,6 +80,22 @@ class TextNowStorage:
                     del data["context"][phone]
             await self.async_save(data)
 
+    async def async_get_last_outbound(self) -> str | None:
+        """Return when this account last sent anything, as an ISO string.
+
+        TextNow hands an unused number back to the pool, so the keep-alive
+        needs to know when the number was last used for real.
+        """
+        data = await self.async_load()
+        recorded = data.get("last_outbound_at")
+        return recorded if isinstance(recorded, str) else None
+
+    async def async_set_last_outbound(self, when: str) -> None:
+        """Record when this account last sent something."""
+        data = await self.async_load()
+        data["last_outbound_at"] = when
+        await self.async_save(data)
+
     async def async_get_pending(self, phone: str) -> dict[str, Any]:
         """Get pending expectations for a phone."""
         data = await self.async_load()

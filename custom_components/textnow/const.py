@@ -20,6 +20,9 @@ CONF_USERNAME: Final = "username"
 CONF_COOKIES: Final = "cookies"
 CONF_POLLING_INTERVAL: Final = "polling_interval"
 CONF_ENTITY_IDS_MIGRATED: Final = "entity_ids_migrated"
+CONF_KEEPALIVE_PHONE: Final = "keepalive_phone"
+CONF_KEEPALIVE_DAYS: Final = "keepalive_days"
+CONF_KEEPALIVE_MESSAGE: Final = "keepalive_message"
 
 # Where the cookie instructions live, used by the repair item and the forms
 COOKIE_HELP_URL: Final = (
@@ -35,6 +38,18 @@ DEFAULT_TTL_SECONDS: Final = 300  # 5 minutes
 
 # Upper bound for the backoff applied after repeated polling failures
 MAX_BACKOFF_INTERVAL: Final = timedelta(minutes=15)
+
+# TextNow gives an unused number back to the pool. The exact idle time is not
+# published and has changed over the years, so the default leaves room under a
+# week rather than sitting on the edge of it.
+DEFAULT_KEEPALIVE_DAYS: Final = 5
+MIN_KEEPALIVE_DAYS: Final = 1
+MAX_KEEPALIVE_DAYS: Final = 30
+DEFAULT_KEEPALIVE_MESSAGE: Final = (
+    "Keeping this TextNow number in use. Sent by Home Assistant, no reply needed."
+)
+# How long to wait before trying a keep-alive again after one did not go out.
+KEEPALIVE_RETRY_INTERVAL: Final = timedelta(hours=1)
 
 # Attributes
 ATTR_PHONE: Final = "phone"
