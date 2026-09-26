@@ -132,10 +132,6 @@
     }
   },
   "issues": {
-    "expired_session": {
-      "title": "TextNow needs a new sign-in",
-      "description": "TextNow signed the saved session for {account} out, so messages cannot be sent or received. Home Assistant has stopped checking for new messages until it has a working session again.\n\nTo fix it, open **Settings → Devices & services → TextNow**, choose **Reconfigure** and paste a fresh cookie line. The TextNow page in the sidebar has the steps, on its Help tab. Your contacts, sensors and automations are kept."
-    },
     "bot_blocked": {
       "title": "TextNow blocked Home Assistant",
       "description": "TextNow's bot protection turned away the requests for {account}, so messages cannot be sent or received. Home Assistant has stopped checking for new messages.\n\nSign in to TextNow in a normal browser and answer anything it asks, then copy a fresh cookie line and paste it under **Settings → Devices & services → TextNow → Reconfigure**. Copy the whole line: the bot-protection part of it is what makes the requests look like the browser they came from. Checking for messages less often, in the integration options, makes this happen less."

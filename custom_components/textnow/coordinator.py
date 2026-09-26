@@ -111,8 +111,6 @@ class TextNowError(HomeAssistantError):
 class TextNowAuthError(TextNowError):
     """Raised when TextNow no longer accepts the stored browser session."""
 
-    issue_key = "expired_session"
-
 
 class TextNowBlockedError(TextNowAuthError):
     """Raised when TextNow's bot protection blocks the request."""
@@ -439,7 +437,16 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
 
     @callback
     def _async_report_auth_problem(self, err: TextNowAuthError) -> None:
-        """Raise a repair item so the fix is one click away."""
+        """Raise a repair item when Home Assistant's own is not enough.
+
+        Asking for a reauth already puts "Authentication expired" in Repairs
+        with a button that opens the form, so repeating it here would be two
+        cards for one problem. Being turned away by the bot protection needs
+        different steps, which is worth its own card.
+        """
+        if not isinstance(err, TextNowBlockedError):
+            return
+
         ir.async_create_issue(
             self.hass,
             DOMAIN,
@@ -462,7 +469,7 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
     @property
     def _auth_issue_id(self) -> str:
         """Return the repair issue id for this account."""
-        return f"expired_session_{self.entry.entry_id}"
+        return f"bot_blocked_{self.entry.entry_id}"
 
     @callback
     def _async_get_session(self) -> aiohttp.ClientSession:

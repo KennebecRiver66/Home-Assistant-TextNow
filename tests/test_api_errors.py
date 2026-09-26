@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from http.cookies import SimpleCookie
+from types import SimpleNamespace
 from typing import Any
 
 import aiohttp
@@ -11,6 +12,7 @@ import pytest
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
+from custom_components.textnow import coordinator as coordinator_module
 from custom_components.textnow.coordinator import (
     TextNowApiError,
     TextNowAuthError,
@@ -268,7 +270,7 @@ class _TestableCoordinator(TextNowDataUpdateCoordinator):
         return None
 
     def _async_report_auth_problem(self, err: TextNowAuthError) -> None:
-        self.reported.append(err.issue_key)
+        self.reported.append(type(err).__name__)
 
     def _async_clear_auth_problem(self) -> None:
         self.reported.clear()
@@ -325,9 +327,37 @@ def test_expired_session_asks_home_assistant_for_reauth() -> None:
         _run(coordinator._async_update_data())
 
     assert coordinator.auth_failed is True
-    assert coordinator.reported == ["expired_session"]
+    assert coordinator.reported == ["TextNowAuthError"]
     # Polling stops so an expired session cannot make thousands of requests
     assert coordinator.update_interval is None
+
+
+def test_only_the_bot_block_gets_a_repair_card_of_its_own(monkeypatch) -> None:
+    """Asking for a reauth already puts a card in Repairs.
+
+    Two cards for one problem is noise, so the integration only adds one when
+    it has different steps to offer.
+    """
+    raised: list[str] = []
+    monkeypatch.setattr(
+        coordinator_module.ir,
+        "async_create_issue",
+        lambda hass, domain, issue_id, **kwargs: raised.append(kwargs["translation_key"]),
+    )
+
+    coordinator = _TestableCoordinator(None)
+    coordinator.hass = None
+    coordinator.entry = SimpleNamespace(title="demo", entry_id="e1")
+
+    TextNowDataUpdateCoordinator._async_report_auth_problem(
+        coordinator, TextNowAuthError("expired")
+    )
+    assert raised == []
+
+    TextNowDataUpdateCoordinator._async_report_auth_problem(
+        coordinator, TextNowBlockedError("blocked")
+    )
+    assert raised == ["bot_blocked"]
 
 
 def test_network_trouble_backs_off_and_keeps_polling() -> None:
