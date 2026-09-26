@@ -168,6 +168,8 @@ does not go quiet:
 - If you dismissed the re-authentication prompt, press **Fix this now** on the
   panel's Connection tab to bring it back, or **Check now** to retry the
   connection as it stands
+- Once the session works again the prompt is withdrawn on its own, so the
+  panel cannot go on asking for a sign-in that is no longer needed
 
 ---
 
@@ -737,6 +739,30 @@ trade-off between how fast messages arrive and how much traffic TextNow sees.
 - Home Assistant 2024.11.0+
 - Valid TextNow account
 - Active browser session cookies
+
+---
+
+## What changed in 1.2.2
+
+**"Sign-in needed" could stick after the problem was over.** The panel worked
+out whether a sign-in was being asked for by checking whether Home Assistant
+held a sign-in form for the account. That is the wrong question twice over: a
+form left open says nothing about whether the session works, and Home
+Assistant's way of reporting them is true whether there are any or not. The
+result was a red banner that survived pasting fresh cookies, on an account
+that was sending and receiving normally, with a **Fix this now** button that
+declined to open the form because it believed one was already open.
+
+- A loaded account's status now comes from the outcome of its last call to
+  TextNow and nothing else. If the last check worked, it reads **Connected**.
+- Sign-in prompts are cleared once the session demonstrably works — after a
+  successful check and after a message TextNow accepted — so a prompt cannot
+  outlive the problem it was asking about.
+- **Fix this now** always does something you can see: it opens the form, or
+  points at the one already waiting, or tells you it could not.
+- A form that fails while opening now shows an error you can retry from. It
+  used to leave an invisible leftover behind that nothing could clear except
+  restarting Home Assistant.
 
 ---
 
