@@ -1,9 +1,5 @@
 {
   "name": "TextNow",
-  "domains": [
-    "textnow"
-  ],
   "homeassistant": "2024.11.0",
-  "iot_class": "Cloud Polling",
   "render_readme": true
 }

@@ -17,7 +17,9 @@ jobs:
         with:
           category: integration
 
+      # Runs even when HACS validation fails, so the two report independently.
       - name: Hassfest validation
+        if: always()
         uses: home-assistant/actions/hassfest@master
 
   tests:
