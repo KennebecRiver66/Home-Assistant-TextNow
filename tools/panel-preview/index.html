@@ -88,6 +88,13 @@
         last_success: ago(24),
         polling_interval: 30,
         current_interval: 30,
+        keepalive: {
+          phone: "+15555550177",
+          enabled: true,
+          days: 5,
+          last_outbound: ago(2 * 86400),
+          due_at: new Date(now.getTime() + 3 * 86400 * 1000).toISOString(),
+        },
         ...over,
       });
 
@@ -130,6 +137,11 @@
         ],
         empty: [],
         nocontacts: [account({ last_success: ago(5) })],
+        nokeepalive: [
+          account({
+            keepalive: { phone: "", enabled: false, days: 5, last_outbound: "", due_at: "" },
+          }),
+        ],
       };
 
       const entries = SCENARIOS[scenario] || SCENARIOS.healthy;
@@ -142,6 +154,7 @@
           }
           if (msg.type === "textnow/refresh") return { status: "connected" };
           if (msg.type === "textnow/send_test") return { success: true };
+          if (msg.type === "textnow/keepalive_now") return { success: true };
           if (msg.type === "textnow/contacts_add") return { id: "contact_new" };
           return {};
         },

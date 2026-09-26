@@ -48,6 +48,8 @@ const ICON = {
     "M12,3C17.5,3 22,6.58 22,11C22,15.42 17.5,19 12,19C10.76,19 9.57,18.82 8.47,18.5C5.55,21 2,21 2,21C4.33,18.67 4.7,17.1 4.75,16.5C3.05,15.07 2,13.13 2,11C2,6.58 6.5,3 12,3Z",
   people:
     "M12,4A4,4 0 0,1 16,8A4,4 0 0,1 12,12A4,4 0 0,1 8,8A4,4 0 0,1 12,4M12,14C16.42,14 20,15.79 20,18V20H4V18C4,15.79 7.58,14 12,14Z",
+  shield:
+    "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M10.94,15.54L7.4,12L8.81,10.59L10.94,12.71L15.19,8.46L16.6,9.88L10.94,15.54Z",
 };
 
 /** Plain-language copy for each connection state. */
@@ -148,6 +150,22 @@ const relativeTime = (iso) => {
   const days = Math.round(hours / 24);
   return days === 1 ? "yesterday" : `${days} days ago`;
 };
+
+/** The other direction from relativeTime: a date that has not arrived yet. */
+const timeUntil = (iso) => {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  const minutes = Math.round((then - Date.now()) / 60000);
+  if (minutes <= 0) return "due now";
+  if (minutes < 60) return "in under an hour";
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return hours === 1 ? "in about an hour" : `in about ${hours} hours`;
+  const days = Math.round(hours / 24);
+  return days === 1 ? "tomorrow" : `in ${days} days`;
+};
+
+const dayPhrase = (days) => (days === 1 ? "a day" : `${days} days`);
 
 const everyPhrase = (seconds) => {
   if (!seconds) return "paused";
@@ -441,6 +459,24 @@ class TextNowPanel extends HTMLElement {
       this._toast(STATUS_COPY[this._statusOf(entry)].headline, "warn");
     }
     this._render();
+  }
+
+  async _sendKeepalive(entryId) {
+    const entry = this._entries.find((item) => item.entry_id === entryId);
+    const phone = entry && entry.keepalive ? formatPhone(entry.keepalive.phone) : "";
+    const sent = await this._call(
+      `keepalive:${entryId}`,
+      () => this._hass.callWS({ type: "textnow/keepalive_now", entry_id: entryId }),
+      {
+        success: phone ? `Sent a message to ${phone}` : "Message sent",
+        failure: "Could not send the message",
+      }
+    );
+
+    if (sent) {
+      await this._fetchEntries();
+      this._render();
+    }
   }
 
   // ------------------------------------------------------------ dialogs
@@ -892,6 +928,7 @@ class TextNowPanel extends HTMLElement {
                  <code>${esc(entry.last_error)}</code></details>`
             : ""
         }
+        ${this._keepaliveBlock(entry, status)}
         <div class="row gap">
           ${
             copy.action && copy.action.act === "fix"
@@ -907,6 +944,55 @@ class TextNowPanel extends HTMLElement {
           <button class="btn" data-act="settings">${svg(ICON.cog, 18)} Settings</button>
         </div>
       </section>
+    `;
+  }
+
+  /**
+   * TextNow reclaims a number nobody uses, so this is a real risk to explain
+   * rather than a setting to bury.
+   */
+  _keepaliveBlock(entry, status) {
+    const keepalive = entry.keepalive || {};
+    const busy = this._busy[`keepalive:${entry.entry_id}`];
+
+    if (!keepalive.enabled) {
+      return `
+        <div class="keepalive off">
+          <div class="ka-icon">${svg(ICON.shield, 22)}</div>
+          <div class="ka-text">
+            <strong>Your number could be reclaimed</strong>
+            <p class="sub">TextNow takes a number back if it sits unused. Home
+              Assistant can send one short text to a number you choose, such as your
+              own phone, whenever nothing else has gone out for a while.</p>
+          </div>
+          <button class="btn sm" data-act="settings">Turn this on</button>
+        </div>
+      `;
+    }
+
+    const lastUsed = keepalive.last_outbound
+      ? `Last message went out ${relativeTime(keepalive.last_outbound)}.`
+      : "Nothing has been sent yet, so the first one goes out shortly.";
+    const due = timeUntil(keepalive.due_at);
+
+    return `
+      <div class="keepalive">
+        <div class="ka-icon ok">${svg(ICON.shield, 22)}</div>
+        <div class="ka-text">
+          <strong>Your number is being kept active</strong>
+          <p class="sub">A short text goes to ${esc(
+            formatPhone(keepalive.phone)
+          )} if nothing else is sent for ${esc(dayPhrase(keepalive.days))}.
+            ${esc(lastUsed)}${due ? ` Next one ${esc(due)}.` : ""}</p>
+        </div>
+        <button class="btn sm" data-act="keepalive" data-entry="${esc(entry.entry_id)}"
+          ${busy || status !== "connected" ? "disabled" : ""}
+          title="${
+            status === "connected"
+              ? "Send the message now instead of waiting"
+              : "Available once the connection is working"
+          }">${busy ? "Sending…" : "Send one now"}</button>
+      </div>
     `;
   }
 
@@ -987,6 +1073,28 @@ class TextNowPanel extends HTMLElement {
           next to their name and send yourself a short text. If it arrives, sending
           works. Reply to it from the other phone and that contact's sensor will
           update, which is what automations watch for.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>Keeping your number</h2>
+        <p>
+          A TextNow number is free, and the catch is that TextNow takes it back if
+          nobody uses it. Losing it means losing the number your contacts reply to
+          and every automation pointed at it, so it is worth guarding.
+        </p>
+        <p>
+          Receiving messages does not count — only sending does. If your automations
+          text people every few days you are already fine. If they only send during
+          a power cut or a leak, the number can quietly expire between emergencies,
+          which is exactly when you need it.
+        </p>
+        <p>
+          To cover that, open <strong>Settings</strong> on the Connection tab, choose
+          <strong>Keep the number in use</strong>, and pick a number to text, usually
+          your own phone. Home Assistant then sends one short message only when
+          nothing else has gone out for a few days, and the Connection tab shows when
+          the next one is due.
         </p>
       </section>
 
@@ -1171,6 +1279,9 @@ class TextNowPanel extends HTMLElement {
         break;
       case "check":
         this._checkNow(entryId);
+        break;
+      case "keepalive":
+        this._sendKeepalive(entryId);
         break;
       case "fix":
       case "settings":
@@ -1668,6 +1779,28 @@ class TextNowPanel extends HTMLElement {
           font-size: 12px;
           word-break: break-word;
         }
+        .keepalive {
+          display: grid;
+          grid-template-columns: auto 1fr auto;
+          align-items: start;
+          gap: 12px;
+          margin-top: 18px;
+          padding: 14px;
+          border: 1px solid var(--line);
+          border-radius: 12px;
+          background: rgba(127, 127, 127, 0.05);
+        }
+        .keepalive .ka-icon { color: var(--muted); padding-top: 2px; }
+        .keepalive .ka-icon.ok { color: var(--ok); }
+        .keepalive.off .ka-icon { color: var(--warn); }
+        .ka-text { min-width: 0; }
+        .ka-text strong { display: block; }
+        .ka-text .sub { margin: 2px 0 0; }
+        /* Narrow: the button drops under the text rather than pushing the
+           icon onto a row of its own. */
+        .compact .keepalive { grid-template-columns: auto 1fr; }
+        .compact .keepalive .btn { grid-column: 2; justify-self: end; }
+
         .about { text-align: center; }
         .about .row { margin-top: 0; }
         .about .sub { margin-top: 14px; }
