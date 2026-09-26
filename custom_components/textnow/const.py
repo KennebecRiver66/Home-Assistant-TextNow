@@ -1,7 +1,11 @@
 """Constants for the TextNow integration."""
+from datetime import timedelta
 from typing import Final
 
 DOMAIN: Final = "textnow"
+
+# Device name; entity IDs are derived from it, so keep it short
+DEVICE_NAME: Final = "TextNow"
 
 # Event types
 EVENT_MESSAGE_RECEIVED: Final = "textnow_message_received"
@@ -11,9 +15,26 @@ EVENT_REPLY_PARSED: Final = "textnow_reply_parsed"
 STORAGE_KEY: Final = f"{DOMAIN}.storage"
 STORAGE_VERSION: Final = 1
 
+# Config entry data keys
+CONF_USERNAME: Final = "username"
+CONF_COOKIES: Final = "cookies"
+CONF_POLLING_INTERVAL: Final = "polling_interval"
+CONF_ENTITY_IDS_MIGRATED: Final = "entity_ids_migrated"
+
+# Where the cookie instructions live, used by the repair item and the forms
+COOKIE_HELP_URL: Final = (
+    "https://github.com/KennebecRiver66/Home-Assistant-TextNow"
+    "#getting-your-cookies"
+)
+
 # Defaults
 DEFAULT_POLLING_INTERVAL: Final = 30  # seconds
+MIN_POLLING_INTERVAL: Final = 15  # seconds
+MAX_POLLING_INTERVAL: Final = 600  # seconds
 DEFAULT_TTL_SECONDS: Final = 300  # 5 minutes
+
+# Upper bound for the backoff applied after repeated polling failures
+MAX_BACKOFF_INTERVAL: Final = timedelta(minutes=15)
 
 # Attributes
 ATTR_PHONE: Final = "phone"
