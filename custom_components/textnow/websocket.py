@@ -7,10 +7,11 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
-from homeassistant.config_entries import ConfigEntryState
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 
-from .const import CONF_POLLING_INTERVAL, DOMAIN
+from .const import CONF_POLLING_INTERVAL, CONF_USERNAME, DOMAIN
 from .phone_utils import format_phone_number
 from .storage import TextNowStorage
 
@@ -26,6 +27,30 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_contacts_update)
     websocket_api.async_register_command(hass, websocket_contacts_delete)
     websocket_api.async_register_command(hass, websocket_send_test)
+    websocket_api.async_register_command(hass, websocket_refresh)
+
+
+STATUS_CONNECTED = "connected"
+STATUS_REAUTH_REQUIRED = "reauth_required"
+STATUS_OFFLINE = "offline"
+STATUS_DISABLED = "disabled"
+
+
+def _entry_status(entry: ConfigEntry, coordinator: Any) -> str:
+    """Return one status for an account, in the order that matters to a user.
+
+    Needing new cookies outranks being offline, because it is the only one
+    the user can do something about.
+    """
+    if entry.state is ConfigEntryState.SETUP_ERROR or (
+        coordinator is not None and coordinator.auth_failed
+    ):
+        return STATUS_REAUTH_REQUIRED
+    if entry.state is not ConfigEntryState.LOADED or coordinator is None:
+        return STATUS_DISABLED
+    if not coordinator.last_update_success:
+        return STATUS_OFFLINE
+    return STATUS_CONNECTED
 
 
 @websocket_api.websocket_command(
@@ -43,24 +68,70 @@ async def websocket_get_entries(
     for entry in hass.config_entries.async_entries(DOMAIN):
         coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
         last_error = getattr(coordinator, "last_exception", None)
+        last_success = getattr(coordinator, "last_success", None)
+        interval = getattr(coordinator, "update_interval", None)
+        status = _entry_status(entry, coordinator)
         result.append(
             {
                 "entry_id": entry.entry_id,
                 "title": entry.title,
+                "account": getattr(coordinator, "username", "")
+                or entry.data.get(CONF_USERNAME, ""),
+                "status": status,
+                # The booleans below predate "status" and are kept so an
+                # older cached panel keeps working after an update.
                 "loaded": entry.state is ConfigEntryState.LOADED,
-                "connected": bool(
-                    coordinator is not None and coordinator.last_update_success
-                ),
-                "needs_reauth": bool(
-                    coordinator is not None and coordinator.auth_failed
-                )
-                or entry.state is ConfigEntryState.SETUP_ERROR,
+                "connected": status == STATUS_CONNECTED,
+                "needs_reauth": status == STATUS_REAUTH_REQUIRED,
                 "last_error": str(last_error) if last_error else "",
+                "last_success": last_success.isoformat() if last_success else "",
                 "polling_interval": entry.data.get(CONF_POLLING_INTERVAL),
+                "current_interval": (
+                    int(interval.total_seconds()) if interval else None
+                ),
             }
         )
 
     connection.send_result(msg["id"], result)
+
+
+@websocket_api.websocket_command(
+    {
+        "type": "textnow/refresh",
+        vol.Required("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_refresh(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Check for messages now instead of waiting for the next poll."""
+    entry_id = msg["entry_id"]
+
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if not entry or entry.domain != DOMAIN:
+        connection.send_error(msg["id"], "not_found", "Config entry not found")
+        return
+
+    coordinator = hass.data.get(DOMAIN, {}).get(entry_id)
+    if coordinator is None:
+        connection.send_error(
+            msg["id"], "not_loaded", "This account is not currently loaded"
+        )
+        return
+
+    # async_refresh reports through the coordinator rather than raising, so a
+    # failed check leaves the panel to show the status it produced.
+    await coordinator.async_refresh()
+    connection.send_result(
+        msg["id"],
+        {
+            "status": _entry_status(entry, coordinator),
+            "last_error": (
+                str(coordinator.last_exception) if coordinator.last_exception else ""
+            ),
+        },
+    )
 
 
 @websocket_api.websocket_command(
@@ -163,7 +234,7 @@ async def websocket_contacts_add(
     {
         "type": "textnow/contacts_update",
         vol.Required("entry_id"): str,
-        vol.Required("id"): str,
+        vol.Required("contact_id"): str,
         vol.Required("name"): str,
         vol.Required("phone"): str,
         vol.Optional("enabled", default=True): bool,
@@ -175,7 +246,7 @@ async def websocket_contacts_update(
 ) -> None:
     """Update an existing contact."""
     entry_id = msg["entry_id"]
-    contact_id = msg["id"]
+    contact_id = msg["contact_id"]
     name = msg["name"].strip()
     phone = msg["phone"].strip()
     
@@ -217,7 +288,7 @@ async def websocket_contacts_update(
     {
         "type": "textnow/contacts_delete",
         vol.Required("entry_id"): str,
-        vol.Required("id"): str,
+        vol.Required("contact_id"): str,
     }
 )
 @websocket_api.async_response
@@ -226,7 +297,7 @@ async def websocket_contacts_delete(
 ) -> None:
     """Delete a contact."""
     entry_id = msg["entry_id"]
-    contact_id = msg["id"]
+    contact_id = msg["contact_id"]
     
     # Verify entry exists
     entry = hass.config_entries.async_get_entry(entry_id)
@@ -256,8 +327,8 @@ async def websocket_contacts_delete(
     {
         "type": "textnow/send_test",
         vol.Required("entry_id"): str,
-        vol.Optional("id"): str,  # contact_id
-        vol.Optional("phone"): str,  # direct phone number
+        vol.Optional("contact_id"): str,
+        vol.Optional("phone"): str,
         vol.Required("message"): str,
     }
 )
@@ -267,7 +338,7 @@ async def websocket_send_test(
 ) -> None:
     """Send a test message."""
     entry_id = msg["entry_id"]
-    contact_id = msg.get("id")
+    contact_id = msg.get("contact_id")
     phone = msg.get("phone")
     message = msg["message"].strip()
     
@@ -304,14 +375,26 @@ async def websocket_send_test(
             connection.send_error(msg["id"], "invalid_format", str(e))
             return
     else:
-        connection.send_error(msg["id"], "invalid_format", "Either id or phone must be provided")
+        connection.send_error(
+            msg["id"],
+            "invalid_format",
+            "Either contact_id or phone must be provided",
+        )
         return
     
     # Send message
     try:
         await coordinator.send_message(phone, message)
+    except HomeAssistantError as err:
+        # TextNow errors already carry text written for the person reading it.
+        connection.send_error(msg["id"], "send_failed", str(err))
+    except Exception:
+        _LOGGER.exception("Unexpected error sending a TextNow message")
+        connection.send_error(
+            msg["id"],
+            "send_failed",
+            "Something went wrong while sending. Check the Home Assistant log.",
+        )
+    else:
         connection.send_result(msg["id"], {"success": True, "phone": phone})
-    except Exception as e:
-        _LOGGER.error("Failed to send test message: %s", e)
-        connection.send_error(msg["id"], "send_failed", str(e))
 
