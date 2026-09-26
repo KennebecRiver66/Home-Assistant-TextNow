@@ -83,17 +83,44 @@ detection, which blocks scripted sign-ins (see
 
 ### Getting your cookies
 
-The quickest way needs no understanding of HTTP headers — five clicks and one
-paste:
+The quickest way needs no understanding of HTTP headers — one search, one
+right-click and one paste. Use a computer; phone browsers have no developer
+tools.
 
-1. Sign in to [textnow.com](https://www.textnow.com) in a desktop browser
-   (Chrome, Edge or Firefox).
-2. Press **F12** to open developer tools, then pick the **Network** tab.
-3. Reload the page (**F5**), then type `messages` in the filter box.
-4. Right-click the first row in the list and choose **Copy** → **Copy as cURL**.
-5. In Home Assistant, go to **Settings** → **Devices & Services** →
-   **+ Add Integration** → **TextNow**, paste into the **Cookies** box and
-   press **Submit**.
+**1. Open the Network tab**
+
+Sign in to [textnow.com](https://www.textnow.com) in Chrome or Edge, then
+press **F12** and click the **Network** tab.
+
+**2. Find the request named `messaging`**
+
+Reload the page (**F5**), press **Ctrl+F** (**⌘F** on a Mac) to open the
+search box, and search for `messaging`.
+
+![Searching the Network tab for the messaging request](images/devtools-find-messaging.png)
+
+In the screenshot above:
+
+- **1** is the search box, with `messaging` typed in
+- **2** is the matching request in the list — click it
+- **3** is how to be sure it is the right one: **Request URL**
+  `https://www.textnow.com/messaging`, method **GET**, status **200 OK**
+
+**3. Copy it as cURL (bash)**
+
+Right-click the **messaging** row and choose **Copy** →
+**Copy as cURL (bash)**.
+
+![Right-clicking the messaging request and choosing Copy as cURL (bash)](images/devtools-copy-as-curl.png)
+
+Pick **(bash)**, the entry circled above. Windows also offers
+**Copy as cURL (cmd)** and **Copy as PowerShell** directly above and below it;
+cmd is understood too, but bash is the cleanest to paste.
+
+**4. Paste it into Home Assistant**
+
+Go to **Settings** → **Devices & Services** → **+ Add Integration** →
+**TextNow**, paste into the **Cookies** box and press **Submit**.
 
 Leave **Username** empty: it is read from the pasted request. Nothing else
 needs to be picked out of the paste — the cookies the integration needs
@@ -103,7 +130,9 @@ the entry is created, so a bad paste is reported immediately instead of
 failing silently later.
 
 > `Copy as cURL` output contains your live session. Treat it like a password:
-> paste it straight into Home Assistant and don't share it anywhere else.
+> paste it straight into Home Assistant and don't share it anywhere else. The
+> screenshots above were taken with the cookie and header values out of view
+> for exactly that reason.
 
 ### If you prefer copying the cookie line
 
@@ -126,13 +155,18 @@ When you paste a plain cookie line, fill in **Username** with the name from
 TextNow signs saved sessions out eventually. When that happens the integration
 does not go quiet:
 
-- Polling stops instead of retrying a rejected session thousands of times a day
+- Checking slows to once every 30 minutes instead of retrying a rejected
+  session thousands of times a day. It does not stop: if the session starts
+  working again, that check notices and normal polling resumes on its own
 - A repair notice appears in **Settings** → **Devices & Services**
 - The integration asks for re-authentication: paste a fresh cookie line and
-  everything resumes. **Your contacts, entities and automations are kept** —
-  there is no need to delete and re-add the integration
+  everything resumes immediately. **Your contacts, entities and automations are
+  kept** — there is no need to delete and re-add the integration, and no need to
+  restart Home Assistant
 - `sensor.textnow_status` reads `New cookies needed`, so it can be used in a
   dashboard card or an alert automation
+- If you dismissed the re-authentication prompt, press **Fix this now** on the
+  panel's Connection tab to bring it back
 
 ---
 
@@ -660,8 +694,10 @@ fixes:
   fresh `Copy as cURL` (it carries the bot-protection cookies as well).
   Raising the polling interval in the integration options makes this rarer.
 
-Polling stops on both, so a broken session logs one message rather than
-filling the log.
+On both, checking slows to once every 30 minutes and the failure is logged
+once rather than every 30 seconds. Those slow checks keep running on purpose:
+they are what notices a session that works again, and what re-offers the
+sign-in prompt if it was dismissed.
 
 ### Menu Not Waiting
 
@@ -700,6 +736,35 @@ trade-off between how fast messages arrive and how much traffic TextNow sees.
 - Home Assistant 2024.11.0+
 - Valid TextNow account
 - Active browser session cookies
+
+---
+
+## What changed in 1.2.1
+
+Two faults that could leave an account stuck until Home Assistant was
+restarted:
+
+- **An expired session no longer locks the account out.** Checking used to
+  stop completely when TextNow refused the cookies, and the "sign-in needed"
+  state was only ever cleared by a check that could no longer happen. Checking
+  now slows to every 30 minutes instead of stopping, so a session that works
+  again is noticed, and a re-authentication prompt that was dismissed comes
+  back. **Fix this now** on the panel's Connection tab re-opens the prompt at
+  any time, and **Send a message** is no longer greyed out while the
+  connection status is merely in doubt.
+- **A bad cookie paste can no longer break anything.** A Windows
+  *Copy as cURL (cmd)* paste used to crash the form with `CookieError:
+  Illegal key`, and a stored paste that had already gone wrong broke every
+  request, including sending. Cookie names are now validated before they are
+  saved, the paste understands both the bash and cmd forms of *Copy as cURL*,
+  and the request path no longer goes through Python's cookie parser at all,
+  so the worst a bad paste can do is report that it contained no session
+  cookie.
+
+Also fixed: a rotated CSRF token is saved immediately rather than up to
+fifteen minutes later, so a restart cannot replay a token that no longer
+matches its session, and a lone 403 is retried once with the token TextNow
+sends back instead of asking for a new sign-in.
 
 ---
 

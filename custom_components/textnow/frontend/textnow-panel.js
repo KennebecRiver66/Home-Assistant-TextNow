@@ -15,6 +15,8 @@ const ADD_ACCOUNT_PAGE = "/config/integrations/dashboard/add?domain=textnow";
 
 /** Found next to this module, so the preview harness resolves it too. */
 const LOGO_URL = new URL("./textnow-logo.png", import.meta.url).href;
+const HELP_FIND_URL = new URL("./help-find-messaging.png", import.meta.url).href;
+const HELP_COPY_URL = new URL("./help-copy-as-curl.png", import.meta.url).href;
 
 /** How often the panel asks Home Assistant how the accounts are doing. */
 const POLL_MS = 15000;
@@ -1059,21 +1061,38 @@ class TextNowPanel extends HTMLElement {
         <p class="lede">
           TextNow has no password option for other apps, so Home Assistant borrows
           the session from a browser you are already signed in to. It sounds
-          technical, but it is five clicks and one paste.
+          technical, but it is one search, one right-click and one paste — the
+          screenshots below show exactly what to look for.
         </p>
         <ol class="steps">
           <li><span class="num">1</span><div>
-            <strong>Sign in to textnow.com</strong> in Chrome, Edge or Firefox on a
+            <strong>Sign in to textnow.com</strong> in Chrome or Edge on a
             computer. Phones cannot do the next step.</div></li>
           <li><span class="num">2</span><div>
             <strong>Press F12.</strong> A panel opens beside the page. Click the
             <strong>Network</strong> tab at the top of it.</div></li>
           <li><span class="num">3</span><div>
-            <strong>Reload the page</strong> and type <code>messages</code> into the
-            filter box so the list is short.</div></li>
+            <strong>Reload the page, then press Ctrl+F</strong> (⌘F on a Mac) and
+            search for <code>messaging</code>. Click the row of that name in the
+            list. It is the right one when the <strong>Headers</strong> panel shows
+            <code>https://www.textnow.com/messaging</code> and
+            <strong>200 OK</strong>.
+            <figure class="shot">
+              <a href="${HELP_FIND_URL}" target="_blank" rel="noreferrer">
+                <img src="${HELP_FIND_URL}" alt="The Network tab search box with messaging typed in, the matching request selected in the list, and its Headers panel showing a 200 OK response" loading="lazy">
+              </a>
+              <figcaption>Click to see it full size</figcaption>
+            </figure></div></li>
           <li><span class="num">4</span><div>
-            <strong>Right-click the first row</strong> in the list and choose
-            <strong>Copy</strong> → <strong>Copy as cURL</strong>.</div></li>
+            <strong>Right-click that row</strong> and choose <strong>Copy</strong> →
+            <strong>Copy as cURL (bash)</strong> — the circled entry below. The
+            Windows <em>(cmd)</em> version works too.
+            <figure class="shot">
+              <a href="${HELP_COPY_URL}" target="_blank" rel="noreferrer">
+                <img src="${HELP_COPY_URL}" alt="The right-click menu on the messaging request, with Copy as cURL (bash) circled inside the Copy submenu" loading="lazy">
+              </a>
+              <figcaption>Click to see it full size</figcaption>
+            </figure></div></li>
           <li><span class="num">5</span><div>
             <strong>Paste it into the Cookies box</strong> when you add the account
             here. Leave the username blank; it is read from the paste.</div></li>
@@ -1891,6 +1910,23 @@ class TextNowPanel extends HTMLElement {
           border-radius: 5px;
           padding: 1px 5px;
           font-size: 12.5px;
+        }
+        /* The screenshots are wide and detailed, so they fill the card and
+           scroll sideways on a phone rather than shrinking into something
+           unreadable. */
+        .shot { margin: 12px 0 2px; overflow-x: auto; }
+        .shot img {
+          display: block;
+          width: 100%;
+          min-width: 520px;
+          border-radius: 10px;
+          border: 1px solid var(--line);
+          box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+        }
+        .shot figcaption {
+          margin-top: 6px;
+          font-size: 12px;
+          color: var(--muted);
         }
 
         /* ------------------------------------------------------ dialogs */
