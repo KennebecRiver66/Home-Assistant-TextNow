@@ -446,6 +446,11 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
             return
         if self._keepalive_task is not None and not self._keepalive_task.done():
             return
+        if (
+            self._keepalive_checked is not None
+            and dt_util.utcnow() - self._keepalive_checked < KEEPALIVE_RETRY_INTERVAL
+        ):
+            return
         self._keepalive_task = self.entry.async_create_background_task(
             self.hass, self.async_run_keepalive(), name="textnow keep-alive"
         )
