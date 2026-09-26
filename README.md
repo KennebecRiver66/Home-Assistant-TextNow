@@ -212,7 +212,11 @@ The Connection tab says so when nothing is guarding the number:
 ![The panel warning that the number could be reclaimed](images/panel-number-at-risk.png)
 
 Once it is turned on, the same place shows when the last message went out and
-when the next one is due, with a **Send one now** button to test it. `sensor.textnow_status` carries the same information in its
+when the next one is due, with a **Send one now** button to test it.
+
+A keep-alive cannot run while the session is expired, which is the moment the
+number is most at risk, so the panel says the keep-alive is paused rather than
+claiming the number is safe. Fixing the sign-in is what protects it. `sensor.textnow_status` carries the same information in its
 `last_message_sent`, `keepalive_phone` and `keepalive_due` attributes, so an
 automation can watch it.
 

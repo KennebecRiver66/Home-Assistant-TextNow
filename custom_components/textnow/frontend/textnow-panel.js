@@ -970,6 +970,22 @@ class TextNowPanel extends HTMLElement {
       `;
     }
 
+    // Nothing can be sent while the connection is down, so claiming the
+    // number is safe would be a lie at the one time it is most at risk.
+    if (status !== "connected") {
+      return `
+        <div class="keepalive off">
+          <div class="ka-icon">${svg(ICON.shield, 22)}</div>
+          <div class="ka-text">
+            <strong>Keeping your number in use is paused</strong>
+            <p class="sub">Nothing can be sent until this connection works again,
+              and TextNow takes back a number that goes unused. Fixing the
+              connection is what protects the number.</p>
+          </div>
+        </div>
+      `;
+    }
+
     const lastUsed = keepalive.last_outbound
       ? `Last message went out ${relativeTime(keepalive.last_outbound)}.`
       : "Nothing has been sent yet, so the first one goes out shortly.";
@@ -986,12 +1002,10 @@ class TextNowPanel extends HTMLElement {
             ${esc(lastUsed)}${due ? ` Next one ${esc(due)}.` : ""}</p>
         </div>
         <button class="btn sm" data-act="keepalive" data-entry="${esc(entry.entry_id)}"
-          ${busy || status !== "connected" ? "disabled" : ""}
-          title="${
-            status === "connected"
-              ? "Send the message now instead of waiting"
-              : "Available once the connection is working"
-          }">${busy ? "Sending…" : "Send one now"}</button>
+          ${busy ? "disabled" : ""}
+          title="Send the message now instead of waiting">${
+            busy ? "Sending…" : "Send one now"
+          }</button>
       </div>
     `;
   }
