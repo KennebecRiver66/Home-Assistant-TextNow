@@ -19,10 +19,12 @@
 - [Features](#features)
 - [Installation](#installation)
 - [Initial Configuration](#initial-configuration)
+  - [If you just signed up for TextNow](#if-you-just-signed-up-for-textnow)
   - [Getting your cookies](#getting-your-cookies)
   - [When the session expires](#when-the-session-expires)
 - [The TextNow panel](#the-textnow-panel)
 - [Keeping your TextNow number](#keeping-your-textnow-number)
+- [How often it checks for messages](#how-often-it-checks-for-messages)
 - [Managing Contacts](#managing-contacts)
 - [Services](#services)
   - [textnow.send](#textnowsend)
@@ -82,6 +84,38 @@ reusing the cookies from a browser that is already signed in. There is no
 username/password option: TextNow's login is protected by PerimeterX bot
 detection, which blocks scripted sign-ins (see
 [Why cookies and not a password](#why-cookies-and-not-a-password)).
+
+### If you just signed up for TextNow
+
+**A new account cannot use the web straight away, and this integration is a
+web client.** TextNow enables a new account for the phone app immediately and
+for the web days later. None of it is documented and nothing tells you it is
+happening, so a new account looks exactly like a broken integration. Reported
+by users, roughly:
+
+| Time since signup | What works |
+|-------------------|------------|
+| Immediately | The Android and iOS apps. Everything. |
+| First ~24 hours | Signing in at textnow.com fails, so there are no cookies to copy and nothing to set up yet. |
+| ~24 to ~48 hours | Signing in works, cookies work, **receiving** works. Sending is refused — the web app says the account is *not yet set up for web access*. |
+| After ~48 hours | Sending starts working, in the web app and here at the same moment. |
+
+The wait is TextNow's and there is nothing to fix at this end. Pasting fresh
+cookies does not shorten it, and neither does reinstalling anything.
+
+**How to tell that this is what you are looking at:** try sending a text from
+textnow.com in a browser. While the web app refuses, so will Home Assistant —
+and the moment it works there, it works here. Home Assistant also puts a
+notice in **Settings → Devices & Services → Repairs** when TextNow gives that
+reason, and logs TextNow's own wording, so you are not left guessing.
+
+If you are setting this up ahead of time, signing up two days before you need
+it turns the whole thing into a non-event.
+
+> Days later, still refused? That is no longer the new-account wait. Check
+> that the account is not [limited](https://help.textnow.com/hc/en-us/articles/13348268993303-Why-was-my-account-limited),
+> that your email is verified, and that you are not on a VPN — TextNow blocks
+> both VPNs and countries outside North America.
 
 ### Getting your cookies
 
@@ -258,6 +292,44 @@ number is most at risk, so the panel says the keep-alive is paused rather than
 claiming the number is safe. Fixing the sign-in is what protects it. `sensor.textnow_status` carries the same information in its
 `last_message_sent`, `keepalive_phone` and `keepalive_due` attributes, so an
 automation can watch it.
+
+---
+
+## How often it checks for messages
+
+TextNow has no way to tell Home Assistant that a message arrived, so the
+integration asks. **Settings** → **Devices & Services** → **TextNow** →
+**Configure** → **Connection and message checking** sets how often, between
+15 seconds and 10 minutes. The default is 30 seconds.
+
+This only affects **incoming** messages. Sending happens the moment the
+automation runs, whatever the interval is.
+
+Each check is a single request, so the interval decides the traffic:
+
+| Interval | Requests to TextNow per day | Worth it when |
+|----------|-----------------------------|---------------|
+| 15s (the fastest allowed) | ~5,800 | Menus and back-and-forth conversations, where a person is waiting |
+| **30s (default)** | ~2,900 | Replying to people; the right answer for almost everyone |
+| 60s | ~1,400 | Alerts and status requests, where a minute does not matter |
+| 300s | ~290 | Mostly sending, with the occasional reply |
+
+The load on Home Assistant is not the thing to worry about — it is one HTTPS
+request per interval, which is nothing. The cost lands on TextNow, and the
+reason to care is that a chatty session is likelier to be challenged by the
+bot protection, which is the one failure that needs a trip to a browser to
+clear. Being greedy here is how an account gets blocked.
+
+**Why not one second?** Because that is 86,400 requests a day, thirty times
+the default, from one address, on a free consumer account, against a service
+that is already watching for automation. The floor here is 15 seconds for that
+reason; a build that lets you set 1 second is not doing you a favour.
+
+> **Interactive menus:** `textnow.send_menu` waits for a reply that can only
+> arrive on the next check, so an answer takes up to one interval to land. The
+> default 30-second interval against the default 30-second menu timeout is a
+> coin toss even when the person answers at once. Keep the interval well below
+> the menu timeout, or raise the timeout.
 
 ---
 
@@ -768,9 +840,26 @@ logger:
     custom_components.textnow: debug
 ```
 
+### Receiving works but sending fails
+
+Almost always a new account. TextNow refuses web sending for up to about 48
+hours after signup while receiving already works — see
+[If you just signed up for TextNow](#if-you-just-signed-up-for-textnow). Try
+sending from textnow.com: while the web app refuses you, so will Home
+Assistant. When TextNow gives that as the reason, a notice appears under
+**Repairs** and the wording lands in the log; it clears itself as soon as a
+message gets through.
+
+If the account is older than that, check whether it has been
+[limited](https://help.textnow.com/hc/en-us/articles/13348268993303-Why-was-my-account-limited),
+and whether TextNow is happy with where the requests come from — it blocks
+VPNs and addresses outside North America. The log line starting
+`TextNow refused POST` carries TextNow's own words, which is the fastest way
+to tell the difference.
+
 ### Authentication Errors
 
-The integration reports two different failures, because they need different
+The integration reports three different failures, because they need different
 fixes:
 
 - **`New cookies needed` / HTTP 401** — the saved session expired. Paste a
@@ -779,16 +868,22 @@ fixes:
   to TextNow in a normal browser, solve any challenge it shows, then paste a
   fresh `Copy as cURL` (it carries the bot-protection cookies as well).
   Raising the polling interval in the integration options makes this rarer.
+- **Not set up for web access** — the account is too new. Nothing to do but
+  wait; no sign-in prompt is raised, because the cookies were never the
+  problem.
 
-On both, checking slows to once every 30 minutes and the failure is logged
-once rather than every 30 seconds. Those slow checks keep running on purpose:
-they are what notices a session that works again, and what re-offers the
-sign-in prompt if it was dismissed.
+On the first two, checking slows to once every 30 minutes and the failure is
+logged once rather than every 30 seconds. Those slow checks keep running on
+purpose: they are what notices a session that works again, and what re-offers
+the sign-in prompt if it was dismissed.
 
 ### Menu Not Waiting
 
 - Increase `timeout` value
 - Verify `response_variable` is set
+- Check the polling interval: a reply can only arrive on the next check, so an
+  interval at or above the menu timeout loses answers that were sent in time.
+  See [How often it checks for messages](#how-often-it-checks-for-messages).
 
 ### Why cookies and not a password
 
@@ -807,7 +902,9 @@ nothing. Until that channel can be verified against a live account, receiving
 uses polling, with every rotated session cookie followed so the session stays
 valid, and backoff so failures do not turn into thousands of requests.
 `Check for new messages every` in the integration options controls the
-trade-off between how fast messages arrive and how much traffic TextNow sees.
+trade-off between how fast messages arrive and how much traffic TextNow sees;
+[How often it checks for messages](#how-often-it-checks-for-messages) has the
+numbers.
 
 ### Finding Device ID
 
@@ -822,6 +919,31 @@ trade-off between how fast messages arrive and how much traffic TextNow sees.
 - Home Assistant 2024.11.0+
 - Valid TextNow account
 - Active browser session cookies
+
+---
+
+## What changed in 1.3.1
+
+**A brand-new TextNow account no longer looks like a broken one.** TextNow
+opens an account up for its phone apps immediately and for the web a day or
+two later, without saying so anywhere. Until now that showed up here as a
+sign-in prompt that fresh cookies could not clear, and then as a send that
+failed for no stated reason.
+
+- **The refusal is reported as itself.** When TextNow answers that the
+  account is not yet set up for web access, that is now its own error rather
+  than an authentication failure, so Home Assistant stops asking for cookies
+  that were never the problem. TextNow's own wording goes into the log, and a
+  notice appears under **Settings → Devices & Services → Repairs** that
+  clears itself the first time a message goes out.
+- **A failed send says where to look.** If TextNow refuses to send while
+  receiving still works, the error now suggests trying the same message at
+  textnow.com, which is the one check that tells a new-account wait apart
+  from a real fault.
+- **[If you just signed up for TextNow](#if-you-just-signed-up-for-textnow)**
+  documents the waiting periods, and
+  **[How often it checks for messages](#how-often-it-checks-for-messages)**
+  gives the polling intervals worth using and what each one costs.
 
 ---
 
