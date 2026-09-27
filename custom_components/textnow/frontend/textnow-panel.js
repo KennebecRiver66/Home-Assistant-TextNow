@@ -1139,6 +1139,24 @@ class TextNowPanel extends HTMLElement {
       </section>
 
       <section class="card">
+        <h2>If the account was made in the last day or two</h2>
+        <p>
+          TextNow opens a new account up for its phone apps at once and for the web
+          later, and says so nowhere. This integration is a web client, so a new
+          account looks like a broken setup for a while: signing in at textnow.com
+          fails for roughly a day, then receiving works but sending is refused as
+          <em>not yet set up for web access</em>, and after about two days sending
+          starts working too.
+        </p>
+        <p>
+          The wait is TextNow's. Fresh cookies do not shorten it and there is nothing
+          to fix here. To tell it apart from a real fault, try sending a text from
+          textnow.com yourself — while it refuses you there, it will refuse Home
+          Assistant, and it starts working in both places at the same moment.
+        </p>
+      </section>
+
+      <section class="card">
         <h2>Checking that it works</h2>
         <p>
           Add a contact on the Contacts tab, then press <strong>Message</strong>
@@ -1178,9 +1196,17 @@ class TextNowPanel extends HTMLElement {
             everyPhrase(
               (this._entries[0] && (this._entries[0].polling_interval || 30)) || 30
             ).replace("every ", "")
-          )} by default. Checking
-          more often delivers messages sooner but makes more requests; you can change
-          it in the integration options.
+          )} by default. A message can
+          therefore sit for that long before Home Assistant sees it. You can change
+          the interval in the integration options.
+        </p>
+        <p>
+          Thirty seconds is about 2,900 requests a day and suits replying to people.
+          Fifteen seconds, the fastest allowed, doubles that and is worth it for
+          menus and conversations where somebody is waiting for the answer. A minute
+          or five is plenty for alerts, and keeps the traffic down. Going lower than
+          the floor is not offered on purpose: once a second would be 86,400 requests
+          a day from one house, which is the sort of pattern TextNow blocks.
         </p>
       </section>
     `;

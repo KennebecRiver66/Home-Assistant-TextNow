@@ -30,6 +30,13 @@ COOKIE_HELP_URL: Final = (
     "#getting-your-cookies"
 )
 
+# TextNow enables a new account for the web days after it works on a phone,
+# which looks exactly like a broken integration unless someone says otherwise.
+NEW_ACCOUNT_HELP_URL: Final = (
+    "https://github.com/KennebecRiver66/Home-Assistant-TextNow"
+    "#if-you-just-signed-up-for-textnow"
+)
+
 # Defaults
 DEFAULT_POLLING_INTERVAL: Final = 30  # seconds
 MIN_POLLING_INTERVAL: Final = 15  # seconds

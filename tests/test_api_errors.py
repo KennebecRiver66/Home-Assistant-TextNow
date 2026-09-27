@@ -20,6 +20,7 @@ from custom_components.textnow.coordinator import (
     TextNowBlockedError,
     TextNowConnectionError,
     TextNowDataUpdateCoordinator,
+    TextNowWebAccessError,
     _extract_messages,
     _parse_json_body,
     async_api_request,
@@ -30,6 +31,22 @@ from fakes import FakeHass
 PERIMETERX_BODY = (
     "<html><head><title>Access to this page has been denied</title>"
     "<script>window._pxAppId</script>PerimeterX</html>"
+)
+
+# Copied from a user report, byte for byte. TextNow's API answers a blocked
+# call with this rather than PerimeterX's interstitial page, so the markers
+# have to survive a shape that carries no HTML and no "denied" anywhere.
+PERIMETERX_API_BODY = (
+    r'{"result":{"appId":"PXK56WkC4O","jsClientSrc":"\/\/client.perimeterx.net'
+    r'\/PXK56WkC4O\/main.min.js","firstPartyEnabled":false,"vid":null,'
+    r'"uuid":"3337b540-46a0-11f1-a1be-8ce1146c5c3d","hostUrl":'
+    r'"https:\/\/collector-pxk56wkc4o.perimeterx.net","blockScript":'
+    r'"https:\/\/captcha.px-cdn.net\/PXK56WkC4O\/captcha.js?a=c\u0026'
+    r'u=3337b540-46a0-11f1-a1be-8ce1146c5c3d\u0026v=\u0026m=0",'
+    r'"altBlockScript":"https:\/\/captcha.px-cloud.net\/PXK56WkC4O\/captcha.js'
+    r'?a=c\u0026u=3337b540-46a0-11f1-a1be-8ce1146c5c3d\u0026v=\u0026m=0",'
+    r'"customLogo":"https:\/\/textnow-static.s3.amazonaws.com\/TextNowLogo.jpg"'
+    r'},"error_code":"PERIMETERX_RESPONSE"}'
 )
 
 
@@ -187,6 +204,53 @@ def test_bot_protection_is_never_retried() -> None:
         )
 
     assert len(session.calls) == 1
+
+
+def test_the_reported_perimeterx_payload_is_read_as_a_block() -> None:
+    """The JSON PerimeterX body from the wild, not the interstitial page.
+
+    A send refused this way used to be the thing users reported as "failed to
+    send message" with a wall of JSON attached, so it is worth pinning the
+    real payload rather than a paraphrase of it.
+    """
+    session = _FakeSession([_FakeResponse(403, PERIMETERX_API_BODY)])
+
+    with pytest.raises(TextNowBlockedError) as err:
+        _run(
+            async_api_request(
+                session,
+                "POST",
+                "https://www.textnow.com/api/users/someone/messages",
+                headers_factory=_headers,
+                json_data={"message": "hello"},
+            )
+        )
+
+    assert "bot protection" in str(err.value)
+    assert err.value.issue_key == "bot_blocked"
+    # Not the wait a brand new account is put through, which needs the
+    # opposite advice: sit still rather than fetch fresh cookies.
+    assert not isinstance(err.value, TextNowWebAccessError)
+    # And not a plain API error either, or nothing would ask for a sign-in.
+    assert isinstance(err.value, TextNowAuthError)
+    assert len(session.calls) == 1
+
+
+def test_a_refusal_keeps_textnows_own_words_for_a_bug_report(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The advice replaces the payload in the error, so debug has to keep it."""
+    session = _FakeSession([_FakeResponse(403, PERIMETERX_API_BODY)])
+
+    with caplog.at_level("DEBUG", logger="custom_components.textnow.coordinator"):
+        with pytest.raises(TextNowBlockedError):
+            _run(
+                async_api_request(
+                    session, "POST", "https://example.invalid", headers_factory=_headers
+                )
+            )
+
+    assert "PERIMETERX_RESPONSE" in caplog.text
 
 
 def test_upload_host_rejection_is_not_blamed_on_the_session() -> None:

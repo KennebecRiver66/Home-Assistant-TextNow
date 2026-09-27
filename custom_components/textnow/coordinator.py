@@ -50,6 +50,7 @@ from .const import (
     MAX_KEEPALIVE_DAYS,
     MIN_KEEPALIVE_DAYS,
     MIN_POLLING_INTERVAL,
+    NEW_ACCOUNT_HELP_URL,
 )
 from .cookies import (
     cookie_header,
@@ -108,12 +109,35 @@ RETRY_DELAY: Final = 2.0
 AUTH_STATUSES: Final = frozenset({401, 419})
 RETRY_STATUSES: Final = frozenset({408, 425, 429, 500, 502, 503, 504})
 
-# Markers PerimeterX puts in its block pages.
+# Markers PerimeterX puts in its block pages. The CDN hostnames are there
+# because TextNow's API answers a blocked call with a PerimeterX JSON payload
+# rather than the interstitial page, and those hostnames are the part of it
+# that cannot be mistaken for anything else.
 BOT_BLOCK_MARKERS: Final = (
     "perimeterx",
     "px-captcha",
     "_pxhd",
+    "px-cdn.net",
+    "px-cloud.net",
     "access to this page has been denied",
+)
+
+# How much of a refused response to write to the debug log. Enough for the
+# whole of a PerimeterX payload, short of a sign-in page rendered in full.
+REFUSAL_LOG_LIMIT: Final = 2000
+
+# How TextNow says it has not finished enabling an account for the web. A new
+# account works on the Android app straight away and is refused here for up to
+# about two days, so this reads as a broken integration unless it is named.
+# Cookies are not the problem and no amount of pasting fresh ones helps.
+WEB_SETUP_MARKERS: Final = (
+    "not yet set up for web",
+    "not set up for web",
+    "still being set up",
+    "account is being set up",
+    "web_access_not",
+    "web access is not",
+    "web access has not",
 )
 
 # Session cookies rotate on almost every call, so only write the refreshed
@@ -133,6 +157,16 @@ class TextNowBlockedError(TextNowAuthError):
     """Raised when TextNow's bot protection blocks the request."""
 
     issue_key = "bot_blocked"
+
+
+class TextNowWebAccessError(TextNowError):
+    """Raised when TextNow has not enabled the account for the web yet.
+
+    Deliberately not an auth error: the session is fine and asking for new
+    cookies cannot fix a wait that is happening on TextNow's side.
+    """
+
+    issue_key = "web_not_ready"
 
 
 class TextNowConnectionError(TextNowError):
@@ -237,12 +271,60 @@ def _is_bot_block(body: str) -> bool:
     return any(marker in lowered for marker in BOT_BLOCK_MARKERS)
 
 
+def _is_web_setup_refusal(body: str) -> bool:
+    """Return whether TextNow refused because the account is too new."""
+    lowered = body.lower()
+    return any(marker in lowered for marker in WEB_SETUP_MARKERS)
+
+
+def _web_setup_error(body: str) -> TextNowWebAccessError:
+    """Return the error for an account TextNow has not opened up yet.
+
+    Logged here as well as raised. A send refused inside an automation may
+    never be read by anyone, and TextNow's own wording is the one thing that
+    explains a wait nobody was told about.
+    """
+    _LOGGER.warning(
+        "TextNow has not finished setting this account up for web access, so "
+        "it refused the request. New accounts are held back from the web for "
+        "up to about 48 hours after signing up while the phone app works "
+        "normally; the cookies are not the problem. TextNow said: %s",
+        body.strip()[:500] or "(no details)",
+    )
+    return TextNowWebAccessError(
+        "TextNow has not finished setting this account up for web access, so "
+        "it refused the request. This is TextNow's own restriction on new "
+        "accounts, not a problem with the cookies: it usually lifts within "
+        "about 48 hours of signing up, and the phone app keeps working "
+        f"meanwhile. TextNow said: {body.strip()[:200]}"
+    )
+
+
 def _raise_for_auth_status(status: int, body: str) -> None:
     """Raise the error that matches a rejected request.
 
     A 401 is an expired session. A 403 is either the same thing or the bot
     protection stepping in; both need fresh cookies but the advice differs.
+    A new account that TextNow has not opened up for the web yet is refused
+    the same way and must not be read as a session problem, or Home Assistant
+    spends two days asking for cookies that were never wrong.
     """
+    # The errors below carry advice rather than TextNow's own words, which
+    # leaves nothing to check when a refusal is classified wrongly. Debug
+    # keeps the evidence available to a bug report without a blocked account
+    # writing a wall of JSON to everyone else's log. The limit is generous
+    # because the field that names the refusal is the last one in TextNow's
+    # JSON, so a tighter cut would throw away the useful part and keep the
+    # boilerplate.
+    _LOGGER.debug(
+        "TextNow refused the request with HTTP %s: %s",
+        status,
+        body.strip()[:REFUSAL_LOG_LIMIT] or "(no body)",
+    )
+
+    if _is_web_setup_refusal(body):
+        raise _web_setup_error(body)
+
     if status == 403:
         if _is_bot_block(body):
             raise TextNowBlockedError(
@@ -329,17 +411,33 @@ async def async_api_request(
                     # token and the cookie disagreeing. The refreshed token
                     # arrived with this very reply and has just been absorbed,
                     # so one more attempt settles it rather than demanding a
-                    # whole new sign-in.
+                    # whole new sign-in. A refusal that explains itself --
+                    # the bot protection, or an account not open for the web
+                    # yet -- will say the same thing three times over.
                     if (
                         response.status != 403
                         or attempt >= attempts
                         or _is_bot_block(body)
+                        or _is_web_setup_refusal(body)
                     ):
                         _raise_for_auth_status(response.status, body)
                     last_error = "HTTP 403 (CSRF token refreshed, retrying)"
                 elif response.status not in RETRY_STATUSES:
                     if response.status >= 400:
                         body = await response.text()
+                        if _is_web_setup_refusal(body):
+                            raise _web_setup_error(body)
+                        # Logged as well as raised: a refusal that reaches an
+                        # automation instead of a person is the one worth
+                        # having a record of, and TextNow's own wording is
+                        # what explains it.
+                        _LOGGER.warning(
+                            "TextNow refused %s %s with HTTP %s: %s",
+                            method,
+                            url,
+                            response.status,
+                            body.strip()[:500] or "(no details)",
+                        )
                         raise TextNowApiError(
                             f"TextNow returned HTTP {response.status}: {body[:200]}"
                         )
@@ -536,9 +634,12 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
         await self.storage.async_set_last_outbound(self._last_outbound.isoformat())
         # A message TextNow accepted proves the session works more directly
         # than a poll does, so anything still asking the user to sign in is
-        # asking about a problem that is over.
+        # asking about a problem that is over. A send getting through is also
+        # the only proof that the wait for web access is over, which a
+        # successful poll does not give.
         self.auth_failed = False
         async_clear_reauth_flows(self.hass, self.entry)
+        self._async_clear_web_setup_problem()
 
     async def async_run_keepalive(self, *, force: bool = False) -> bool:
         """Text the safe number if nothing has been sent for long enough.
@@ -692,14 +793,67 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
         )
 
     @callback
+    def _async_report_web_setup_problem(self) -> None:
+        """Raise a repair item for an account TextNow has not opened up yet.
+
+        Worth its own card because the steps are unlike every other failure
+        here: there are none. Pasting cookies cannot help, and the only thing
+        to do is wait for TextNow and check the web app now and then.
+        """
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            self._web_issue_id,
+            is_fixable=False,
+            is_persistent=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=TextNowWebAccessError.issue_key,
+            translation_placeholders={
+                "account": self.entry.title or self.username,
+            },
+            learn_more_url=NEW_ACCOUNT_HELP_URL,
+        )
+
+    @callback
+    def _async_add_refusal_hint(
+        self, method: str, err: TextNowApiError
+    ) -> TextNowApiError:
+        """Suggest the check that explains most refused sends.
+
+        Only a send is POSTed here, so a refusal on an account whose message
+        checks are working means TextNow took the session and still would not
+        act on it. A new account being held back from the web does that, and
+        the fastest way to tell is to try the same thing in a browser.
+        """
+        if method != "POST" or not self.last_update_success:
+            return err
+        return TextNowApiError(
+            f"{err}. Checking for messages on this account works, so the "
+            "session is good and it is this send TextNow turned down. Try "
+            "sending from textnow.com in a browser: if the web app refuses "
+            "too, TextNow has not finished setting the account up for web "
+            "access, which can take about 48 hours after signing up"
+        )
+
+    @callback
     def _async_clear_auth_problem(self) -> None:
         """Remove the repair item once the session works again."""
         ir.async_delete_issue(self.hass, DOMAIN, self._auth_issue_id)
+
+    @callback
+    def _async_clear_web_setup_problem(self) -> None:
+        """Remove the repair item once a send has gone through."""
+        ir.async_delete_issue(self.hass, DOMAIN, self._web_issue_id)
 
     @property
     def _auth_issue_id(self) -> str:
         """Return the repair issue id for this account."""
         return f"bot_blocked_{self.entry.entry_id}"
+
+    @property
+    def _web_issue_id(self) -> str:
+        """Return the web access repair issue id for this account."""
+        return f"web_not_ready_{self.entry.entry_id}"
 
     @callback
     def _async_get_session(self) -> aiohttp.ClientSession:
@@ -826,6 +980,16 @@ class TextNowDataUpdateCoordinator(DataUpdateCoordinator):
                 timeout=timeout,
                 parse_json=parse_json,
             )
+        except TextNowWebAccessError:
+            # Nothing to reauthenticate and nothing to back off from: the
+            # account simply is not open for business on the web yet.
+            self._async_report_web_setup_problem()
+            raise
+        except TextNowApiError as err:
+            hinted = self._async_add_refusal_hint(method, err)
+            if hinted is err:
+                raise
+            raise hinted from err
         except TextNowAuthError as err:
             # A service call has no coordinator refresh to report through, so
             # the reauth flow and the repair item are started here.

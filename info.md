@@ -18,3 +18,11 @@ A powerful Home Assistant integration for TextNow SMS that enables multi-step co
 
 Available via HACS or manual installation. See README.md for details.
 
+## Brand-new TextNow account?
+
+TextNow enables a new account for its phone apps immediately and for the web a
+day or two later, without telling you. Signing in at textnow.com fails for
+roughly the first 24 hours, and sending is refused as "not yet set up for web
+access" until around 48 hours, in the TextNow web app and here alike. Nothing
+to fix — see [If you just signed up for TextNow](https://github.com/KennebecRiver66/Home-Assistant-TextNow#if-you-just-signed-up-for-textnow).
+
