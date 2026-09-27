@@ -815,6 +815,26 @@ trade-off between how fast messages arrive and how much traffic TextNow sees.
 2. Click the TextNow device
 3. Device ID is in the URL
 
+### The integration shows a grey placeholder instead of the TextNow mark
+
+The icon ships with the integration, in
+`custom_components/textnow/brand/`. Home Assistant 2026.3 and later read it
+from there and it appears wherever an integration icon does, including the
+HACS list, at full sharpness on a high-resolution screen.
+
+Older versions of Home Assistant only look in Home Assistant's
+[brands repository](https://github.com/home-assistant/brands), which has no
+entry for this fork, so they fall back to the generic placeholder. The same
+goes for the HACS store listing before you install anything, because there is
+no local copy to read yet. Neither affects a single thing about how the
+integration works.
+
+To cover those cases too, copy `custom_components/textnow/brand/` to
+`custom_integrations/textnow/` in a fork of the brands repository and open a
+pull request there. That folder is how every custom integration used to do
+this; the repository now labels it legacy, and caches for a week, so expect a
+wait either way.
+
 ---
 
 ## Requirements
