@@ -114,8 +114,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Clean up the repair item when an account is removed."""
+    """Clean up the repair items when an account is removed."""
     ir.async_delete_issue(hass, DOMAIN, f"bot_blocked_{entry.entry_id}")
+    ir.async_delete_issue(hass, DOMAIN, f"web_not_ready_{entry.entry_id}")
 
 
 async def _async_migrate_entity_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:

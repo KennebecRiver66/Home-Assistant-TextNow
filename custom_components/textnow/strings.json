@@ -147,6 +147,10 @@
     }
   },
   "issues": {
+    "web_not_ready": {
+      "title": "TextNow has not opened this account up for the web yet",
+      "description": "TextNow refused a message from {account} because it has not finished setting the account up for web access. Nothing here is broken and the cookies are fine — TextNow holds new accounts back from the web for up to about 48 hours after signing up, even though the phone app works immediately.\n\nThere are no steps to follow. To see where you are, try sending a text from textnow.com in a browser: while it refuses you, so will Home Assistant. This notice clears itself as soon as a message gets through."
+    },
     "bot_blocked": {
       "title": "TextNow blocked Home Assistant",
       "description": "TextNow's bot protection turned away the requests for {account}, so messages cannot be sent or received. Home Assistant has stopped checking for new messages.\n\nSign in to TextNow in a normal browser and answer anything it asks, then copy a fresh cookie line and paste it under **Settings → Devices & services → TextNow → Reconfigure**. Copy the whole line: the bot-protection part of it is what makes the requests look like the browser they came from. Checking for messages less often, in the integration options, makes this happen less."
