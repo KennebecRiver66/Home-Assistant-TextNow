@@ -5,6 +5,7 @@ A powerful Home Assistant integration for TextNow SMS that enables multi-step co
 ## Features
 
 - 📱 Full SMS support (send/receive)
+- 🔔 Works with Home Assistant's notify service: `notify.textnow`, plus a notify entity per contact
 - 🔄 Automatic message polling with deduplication
 - 👥 UI-managed contact list
 - 🎯 Smart prompts with reply parsing

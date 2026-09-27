@@ -841,7 +841,7 @@ class TextNowPanel extends HTMLElement {
         ${svg(ICON.people, 32)}
         <p><strong>No contacts yet</strong></p>
         <p class="sub">A contact gives you a sensor that holds their last message,
-          and a name you can use in automations.</p>
+          something to notify, and a name you can use in automations.</p>
         <button class="btn primary" data-act="toggle-add" data-entry="${esc(entry.entry_id)}">
           ${svg(ICON.plus, 20)} Add your first contact
         </button>
@@ -1240,9 +1240,10 @@ class TextNowPanel extends HTMLElement {
 
     if (dialog.kind === "delete") {
       title = `Remove ${esc(dialog.name)}?`;
-      body = `<p>Their sensor is removed from Home Assistant. Any automation that
-        uses it will stop working until you point it somewhere else. Messages
-        already received are not deleted from TextNow.</p>`;
+      body = `<p>Their sensor and their notify entity are removed from Home
+        Assistant. Any automation that uses either will stop working until you
+        point it somewhere else. Messages already received are not deleted from
+        TextNow.</p>`;
       footer = `
         <button class="btn" data-act="dialog-close">Keep contact</button>
         <button class="btn danger" data-act="delete-confirm" ${this._busy.delete ? "disabled" : ""}>

@@ -101,14 +101,14 @@
       },
       "confirm_delete": {
         "title": "Remove {name}?",
-        "description": "Their sensor is removed from Home Assistant, and any automation using it stops working until you point it somewhere else. Messages already in TextNow are not deleted.",
+        "description": "Their sensor and their notify entity are removed from Home Assistant, and any automation using either stops working until you point it somewhere else. Messages already in TextNow are not deleted.",
         "data": {
           "confirm": "Yes, remove this contact"
         }
       },
       "add_contact": {
         "title": "Add a contact",
-        "description": "This creates a sensor named after the contact, which holds the last message they sent.",
+        "description": "This creates a sensor named after the contact, which holds the last message they sent, and a notify entity that texts them.",
         "data": {
           "name": "Name",
           "phone": "Phone number"
