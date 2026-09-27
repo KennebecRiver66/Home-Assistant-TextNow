@@ -952,6 +952,19 @@ failed for no stated reason.
   **[How often it checks for messages](#how-often-it-checks-for-messages)**
   gives the polling intervals worth using and what each one costs.
 
+Also, on the refusal next door to that one:
+
+- **Every refused request now records what TextNow actually replied**, at
+  debug level. The errors themselves still say what to do rather than
+  quoting a wall of JSON, which left nothing to check when one was named
+  wrongly.
+- **The bot-protection notice said checking had stopped.** It has not stopped
+  since 1.2.2 — it slows to one check every 30 minutes, which is the only
+  thing that can notice the block lifting. The notice now says so.
+- Bot protection is also matched on PerimeterX's CDN hostnames, so a blocked
+  send is recognised from the JSON its API returns and not only from the
+  block page.
+
 ---
 
 ## What changed in 1.3.0
