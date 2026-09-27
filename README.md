@@ -27,6 +27,7 @@
 - [Services](#services)
   - [textnow.send](#textnowsend)
   - [textnow.send_menu](#textnowsend_menu)
+  - [notify.textnow](#notifytextnow)
 - [Triggers](#triggers)
   - [SMS Message Received](#sms-message-received)
   - [Phrase Received in SMS](#phrase-received-in-sms)
@@ -44,6 +45,7 @@
 | **Send SMS** | Send text messages to any contact |
 | **Send MMS** | Send images with optional captions |
 | **Send Voice Messages** | Send audio files as voice messages |
+| **Notification Platform** | `notify.textnow` and a `notify` entity per contact, so anything written for another SMS integration works unchanged |
 | **Interactive Menus** | Send numbered menus, wait for response, take action |
 | **Message Triggers** | Trigger automations when any contact texts you |
 | **Phrase Triggers** | Trigger automations when a specific phrase is received |
@@ -423,6 +425,86 @@ response_variable: choice
 
 ---
 
+### notify.textnow
+
+TextNow also registers as one of Home Assistant's notification platforms, so
+an automation, script or blueprint written for Twilio or any other SMS
+integration works by changing the service name and nothing else.
+
+```yaml
+action: notify.textnow
+data:
+  message: "The garage door has been open for 10 minutes."
+  title: "Alert"
+  target: "Mom"
+```
+
+#### Fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| **message** | Yes | The text to send. May be empty when sending only an image or audio file. |
+| **title** | No | A text message has no title, so this becomes the first line rather than being dropped. |
+| **target** | No | Who to text. Leave it out to reply to whoever triggered the automation. |
+| **data** | No | An image or audio file to attach. |
+
+A **target** can be written whichever way suits the automation:
+
+| Target | Example |
+|--------|---------|
+| A phone number, in any format | `"(555) 123-4567"`, `5551234567`, `"+15551234567"` |
+| A contact's name | `"Mom"` |
+| A contact's sensor | `sensor.textnow_mom` |
+
+Give it a list to text several people. Each one is attempted even if another
+fails, so a number that is no longer in service does not silence the rest:
+
+```yaml
+action: notify.textnow
+data:
+  message: "Smoke detected in the kitchen."
+  target:
+    - "Mom"
+    - "(555) 123-4567"
+```
+
+#### Attachments
+
+`data` takes a file path or an `http(s)` URL. The keys other integrations use
+are accepted, so a Twilio automation sending `media_url` needs no edit:
+
+```yaml
+action: notify.textnow
+data:
+  message: "Someone is at the door."
+  target: "Mom"
+  data:
+    image: /config/www/snapshots/front_door.jpg
+```
+
+| Key | Sent as |
+|-----|---------|
+| `image`, `mms_image`, `media_url`, `media`, `attachment` | MMS |
+| `audio`, `voice_audio`, `voice` | Voice message |
+
+#### Notify entities
+
+Every contact also gets a notify entity, `notify.textnow_<name>`, which is
+what the entity picker and any blueprint built around `notify.send_message`
+point at:
+
+```yaml
+action: notify.send_message
+target:
+  entity_id: notify.textnow_mom
+data:
+  message: "Back in ten minutes."
+```
+
+Entities are added and removed with their contacts, without a restart.
+
+---
+
 ## Triggers
 
 TextNow provides two device triggers for automations.
@@ -648,7 +730,8 @@ automation:
 
 ## Sensor Entities
 
-Each contact creates a sensor: `sensor.textnow_<contact_name>`
+Each contact creates a sensor: `sensor.textnow_<contact_name>`, and a notify
+entity to text them: `notify.textnow_<contact_name>`
 
 ### Attributes
 
@@ -739,6 +822,27 @@ trade-off between how fast messages arrive and how much traffic TextNow sees.
 - Home Assistant 2024.11.0+
 - Valid TextNow account
 - Active browser session cookies
+
+---
+
+## What changed in 1.3.0
+
+**TextNow is now one of Home Assistant's notification platforms.** Sending
+used to mean `textnow.send`, with field names of its own, so an automation or
+a shared blueprint written for another SMS integration had to be rewritten
+before it could be pointed at TextNow.
+
+- **`notify.textnow`** takes Home Assistant's own notification fields —
+  `message`, `title`, `target` and `data` — so switching from Twilio or
+  another SMS notifier means changing the service name and nothing else. A
+  target can be a phone number, a contact's name or their sensor, and a list
+  texts several people at once.
+- **A notify entity per contact**, `notify.textnow_<name>`, for the entity
+  picker and for blueprints built around `notify.send_message`.
+- Attachments keep working under whichever name the original automation used,
+  including Twilio's `media_url`.
+- `textnow.send` and `textnow.send_menu` are unchanged. Both paths run the
+  same send, so nothing has to be migrated.
 
 ---
 

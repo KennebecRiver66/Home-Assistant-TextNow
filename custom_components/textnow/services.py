@@ -9,8 +9,15 @@ from typing import Any
 import aiohttp
 import voluptuous as vol
 
+from homeassistant.components.notify import (
+    ATTR_DATA,
+    ATTR_MESSAGE,
+    ATTR_TARGET,
+    ATTR_TITLE,
+)
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import config_validation as cv
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -22,6 +29,7 @@ from .const import (
     DEFAULT_NUMBER_FORMAT,
 )
 from .coordinator import TextNowDataUpdateCoordinator
+from .phone_utils import format_phone_number, validate_phone_number
 from .storage import TextNowStorage
 
 _LOGGER = logging.getLogger(__name__)
@@ -50,6 +58,50 @@ SERVICE_SEND_MENU_SCHEMA = vol.Schema(
         vol.Optional("number_format", default=DEFAULT_NUMBER_FORMAT): str,
     }
 )
+
+# notify.textnow takes Home Assistant's notification payload rather than this
+# integration's own, so an automation or blueprint written for another SMS
+# integration works by changing nothing but the service name.
+NOTIFY_SEND_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_MESSAGE): cv.string,
+        vol.Optional(ATTR_TITLE): cv.string,
+        vol.Optional(ATTR_TARGET): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional(ATTR_DATA): dict,
+    }
+)
+
+# Shown in Developer tools and the automation editor. Services in the notify
+# domain cannot be described from this integration's services.yaml, which only
+# describes its own domain, so the description is registered from code.
+NOTIFY_SERVICE_DESCRIPTION: dict[str, Any] = {
+    "name": "Send a notification with TextNow",
+    "description": "Sends a text message through TextNow.",
+    "fields": {
+        ATTR_MESSAGE: {
+            "required": True,
+            "example": "The garage door has been open for 10 minutes.",
+            "selector": {"text": {"multiline": True}},
+        },
+        ATTR_TITLE: {
+            "example": "Home Assistant",
+            "selector": {"text": None},
+        },
+        ATTR_TARGET: {
+            "example": "(555) 123-4567",
+            "selector": {"object": None},
+        },
+        ATTR_DATA: {
+            "example": '{"image": "/config/www/photo.jpg"}',
+            "selector": {"object": None},
+        },
+    },
+}
+
+# What other integrations call an attachment, in the order they are looked for.
+# media_url is Twilio's, image is the companion app's.
+NOTIFY_IMAGE_KEYS = ("mms_image", "image", "media_url", "media", "attachment")
+NOTIFY_AUDIO_KEYS = ("voice_audio", "audio", "voice")
 
 
 @callback
@@ -139,6 +191,111 @@ async def async_send_message(
         await coordinator.send_voice_message(phone, file_data)
         _LOGGER.debug("Sent voice message to %s", phone)
         _async_notify_sent(hass, phone)
+
+
+async def async_notify(
+    hass: HomeAssistant, coordinator: TextNowDataUpdateCoordinator, data: dict[str, Any]
+) -> None:
+    """Handle a notify.textnow call.
+
+    Translates Home Assistant's notification payload into the send the
+    textnow.send service performs, so the two cannot drift apart. Every target
+    is attempted even if one of them fails, because a number that is no longer
+    in service should not silence the notification for everyone else.
+    """
+    extras = data.get(ATTR_DATA) or {}
+    payload: dict[str, Any] = {
+        "message": notify_text(data.get(ATTR_MESSAGE, ""), data.get(ATTR_TITLE)),
+        "mms_image": _first_value(extras, NOTIFY_IMAGE_KEYS),
+        "voice_audio": _first_value(extras, NOTIFY_AUDIO_KEYS),
+    }
+
+    targets = data.get(ATTR_TARGET) or []
+    if not targets:
+        # No target replies to the message that triggered the automation, the
+        # same as textnow.send with no contact.
+        await async_send_message(hass, coordinator, payload)
+        return
+
+    first_error: Exception | None = None
+
+    for target in targets:
+        try:
+            destination = await _async_resolve_target(hass, coordinator, target)
+            await async_send_message(hass, coordinator, {**payload, **destination})
+        except Exception as err:  # noqa: BLE001 - one bad target is not all of them
+            if len(targets) == 1:
+                raise
+            _LOGGER.error("TextNow could not notify %s: %s", target, err)
+            if first_error is None:
+                first_error = err
+
+    if first_error is not None:
+        raise first_error
+
+
+def notify_text(message: str, title: str | None) -> str:
+    """Return the text to send for a message and title.
+
+    A text message has no title field, so a title becomes the first line. That
+    is what the SMS integrations this replaces do, and it keeps the title of a
+    shared blueprint visible instead of dropping it.
+    """
+    title = (title or "").strip()
+    message = message or ""
+    if not title:
+        return message
+    if not message:
+        return title
+    return f"{title}\n{message}"
+
+
+def _first_value(extras: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    """Return the first usable attachment under any of the given keys."""
+    for key in keys:
+        value = extras.get(key)
+        if isinstance(value, (list, tuple)):
+            value = value[0] if value else None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+async def _async_resolve_target(
+    hass: HomeAssistant, coordinator: TextNowDataUpdateCoordinator, target: str
+) -> dict[str, str]:
+    """Return the send payload for one notify target.
+
+    A target may be a phone number, a contact's name, its storage id or its
+    sensor entity id, because an automation written by hand will use whichever
+    of those the author had in front of them.
+    """
+    target = str(target or "").strip()
+    if not target:
+        raise ServiceValidationError(
+            "A notify target was empty. Use a 10-digit phone number or the "
+            "name of a TextNow contact."
+        )
+
+    if validate_phone_number(target):
+        return {"phone": format_phone_number(target)}
+
+    if target.startswith("sensor."):
+        return {ATTR_CONTACT_ID: target}
+
+    contacts = await TextNowStorage(
+        hass, coordinator.entry.entry_id
+    ).async_get_contacts()
+
+    if target not in contacts:
+        folded = target.casefold()
+        for contact_id, contact in contacts.items():
+            if str(contact.get("name", "")).casefold() == folded:
+                return {ATTR_CONTACT_ID: contact_id}
+
+    # Unknown either way: the shared resolver raises the error that lists the
+    # contacts this account does know about.
+    return {ATTR_CONTACT_ID: target}
 
 
 async def _async_read_media(hass: HomeAssistant, file_path: str) -> bytes:
