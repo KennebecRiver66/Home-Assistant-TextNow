@@ -864,10 +864,13 @@ fixes:
 
 - **`New cookies needed` / HTTP 401** — the saved session expired. Paste a
   fresh cookie line into the re-authentication prompt.
-- **HTTP 403 with bot protection** — PerimeterX rejected the request. Sign in
-  to TextNow in a normal browser, solve any challenge it shows, then paste a
-  fresh `Copy as cURL` (it carries the bot-protection cookies as well).
-  Raising the polling interval in the integration options makes this rarer.
+- **HTTP 403 with bot protection** — PerimeterX rejected the request. Raw, it
+  arrives either as a page saying *Access to this page has been denied* or as
+  `{"error_code":"PERIMETERX_RESPONSE", …}` with a pile of captcha URLs in it;
+  Home Assistant names it instead of repeating it. Sign in to TextNow in a
+  normal browser, solve any challenge it shows, then paste a fresh
+  `Copy as cURL` (it carries the bot-protection cookies as well). Raising the
+  polling interval in the integration options makes this rarer.
 - **Not set up for web access** — the account is too new. Nothing to do but
   wait; no sign-in prompt is raised, because the cookies were never the
   problem.
@@ -876,6 +879,10 @@ On the first two, checking slows to once every 30 minutes and the failure is
 logged once rather than every 30 seconds. Those slow checks keep running on
 purpose: they are what notices a session that works again, and what re-offers
 the sign-in prompt if it was dismissed.
+
+With [debug logging](#checking-the-connection) on, each refusal also records
+what TextNow actually replied. That is the thing to attach to a bug report if
+one of these is ever named wrongly.
 
 ### Menu Not Waiting
 
