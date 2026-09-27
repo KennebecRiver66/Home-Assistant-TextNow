@@ -109,13 +109,22 @@ RETRY_DELAY: Final = 2.0
 AUTH_STATUSES: Final = frozenset({401, 419})
 RETRY_STATUSES: Final = frozenset({408, 425, 429, 500, 502, 503, 504})
 
-# Markers PerimeterX puts in its block pages.
+# Markers PerimeterX puts in its block pages. The CDN hostnames are there
+# because TextNow's API answers a blocked call with a PerimeterX JSON payload
+# rather than the interstitial page, and those hostnames are the part of it
+# that cannot be mistaken for anything else.
 BOT_BLOCK_MARKERS: Final = (
     "perimeterx",
     "px-captcha",
     "_pxhd",
+    "px-cdn.net",
+    "px-cloud.net",
     "access to this page has been denied",
 )
+
+# How much of a refused response to write to the debug log. Enough for the
+# whole of a PerimeterX payload, short of a sign-in page rendered in full.
+REFUSAL_LOG_LIMIT: Final = 2000
 
 # How TextNow says it has not finished enabling an account for the web. A new
 # account works on the Android app straight away and is refused here for up to
@@ -300,6 +309,19 @@ def _raise_for_auth_status(status: int, body: str) -> None:
     the same way and must not be read as a session problem, or Home Assistant
     spends two days asking for cookies that were never wrong.
     """
+    # The errors below carry advice rather than TextNow's own words, which
+    # leaves nothing to check when a refusal is classified wrongly. Debug
+    # keeps the evidence available to a bug report without a blocked account
+    # writing a wall of JSON to everyone else's log. The limit is generous
+    # because the field that names the refusal is the last one in TextNow's
+    # JSON, so a tighter cut would throw away the useful part and keep the
+    # boilerplate.
+    _LOGGER.debug(
+        "TextNow refused the request with HTTP %s: %s",
+        status,
+        body.strip()[:REFUSAL_LOG_LIMIT] or "(no body)",
+    )
+
     if _is_web_setup_refusal(body):
         raise _web_setup_error(body)
 
